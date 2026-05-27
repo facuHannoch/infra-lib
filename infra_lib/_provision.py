@@ -4,7 +4,7 @@ import pulumi
 from pulumi import automation as auto
 from pulumi_azure_native import resources, network, compute
 
-_DEFAULT_SSH_KEY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.ssh/id_rsa")
+_DEFAULT_SSH_KEY = os.path.expanduser("~/.infra-lib/keys/default_id_rsa")
 
 
 def _make_infrastructure(ssh_key_path: str):
@@ -144,6 +144,17 @@ systemctl start caddy
     return _infrastructure
 
 
+def destroy(name: str):
+    stack = auto.select_stack(
+        stack_name=name,
+        project_name="infra-lib",
+        program=lambda: None,
+        opts=auto.LocalWorkspaceOptions(env_vars={"PULUMI_CONFIG_PASSPHRASE": ""}),
+    )
+    stack.destroy(on_output=print)
+    stack.workspace.remove_stack(name)
+
+
 def list_deployments() -> list:
     ws = auto.LocalWorkspace(
         project_settings=auto.ProjectSettings(name="infra-lib", runtime="python"),
@@ -160,10 +171,12 @@ def list_deployments() -> list:
                 opts=auto.LocalWorkspaceOptions(env_vars={"PULUMI_CONFIG_PASSPHRASE": ""}),
             )
             outputs = {k: v.value for k, v in stack.outputs().items()}
+            from ._keys import key_path
             result.append({
                 "name": stack_summary.name,
                 "ip": outputs.get("public_ip", "-"),
                 "url": outputs.get("url", "-"),
+                "ssh_key": key_path(stack_summary.name),
             })
         except Exception:
             result.append({"name": stack_summary.name, "ip": "-", "url": "-"})
@@ -171,6 +184,8 @@ def list_deployments() -> list:
 
 
 def provision(name: str = "default", location: str = "CentralUS", ssh_key_path: str = None) -> dict:
+    from ._auth import load_azure_credentials
+    load_azure_credentials()
     ssh_key_path = os.path.abspath(ssh_key_path or _DEFAULT_SSH_KEY)
     stack = auto.create_or_select_stack(
         stack_name=name,

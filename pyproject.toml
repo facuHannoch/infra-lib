@@ -10,6 +10,9 @@ dependencies = [
     "pulumi>=3.0.0,<4.0.0",
     "pulumi-azure-native>=3.0.0,<4.0.0",
     "paramiko>=3.0.0",
+    "azure-identity>=1.15.0",
+    "azure-mgmt-subscription>=3.0.0",
+    "azure-mgmt-authorization>=3.0.0",
 ]
 
 [project.scripts]
