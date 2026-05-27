@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "infra-lib"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "pulumi>=3.0.0,<4.0.0",
+    "pulumi-azure-native>=3.0.0,<4.0.0",
+    "paramiko>=3.0.0",
+]
+
+[project.scripts]
+infra-lib = "infra_lib._cli:main"
+
+[tool.setuptools.packages.find]
+include = ["infra_lib*"]
