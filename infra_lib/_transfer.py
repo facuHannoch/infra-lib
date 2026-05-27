@@ -40,6 +40,9 @@ def transfer(host: str, source_dir: str, caddyfile: str = None, ssh_key_path: st
     _wait_for_ssh(host, ssh_key_path)
     client = _connect(host, ssh_key_path)
 
+    _, _, stderr = client.exec_command("sudo mkdir -p /srv/files && sudo chown azureuser:azureuser /srv/files")
+    stderr.channel.recv_exit_status()
+
     sftp = client.open_sftp()
     for filename in os.listdir(source_dir):
         local_path = os.path.join(source_dir, filename)

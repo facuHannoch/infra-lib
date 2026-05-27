@@ -13,11 +13,12 @@ class DeployResult:
 
 def deploy(
     source: str,
+    name: str = "default",
     domain: Optional[Domain] = None,
     location: str = "CentralUS",
     ssh_key_path: str = None,
 ) -> DeployResult:
-    outputs = provision(location=location, ssh_key_path=ssh_key_path)
+    outputs = provision(name=name, location=location, ssh_key_path=ssh_key_path)
     ip = outputs["public_ip"]
 
     if domain:

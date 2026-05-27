@@ -144,12 +144,39 @@ systemctl start caddy
     return _infrastructure
 
 
-def provision(location: str = "CentralUS", ssh_key_path: str = None) -> dict:
+def list_deployments() -> list:
+    ws = auto.LocalWorkspace(
+        project_settings=auto.ProjectSettings(name="infra-lib", runtime="python"),
+        env_vars={"PULUMI_CONFIG_PASSPHRASE": ""},
+    )
+    stacks = ws.list_stacks()
+    result = []
+    for stack_summary in stacks:
+        try:
+            stack = auto.select_stack(
+                stack_name=stack_summary.name,
+                project_name="infra-lib",
+                program=lambda: None,
+                opts=auto.LocalWorkspaceOptions(env_vars={"PULUMI_CONFIG_PASSPHRASE": ""}),
+            )
+            outputs = {k: v.value for k, v in stack.outputs().items()}
+            result.append({
+                "name": stack_summary.name,
+                "ip": outputs.get("public_ip", "-"),
+                "url": outputs.get("url", "-"),
+            })
+        except Exception:
+            result.append({"name": stack_summary.name, "ip": "-", "url": "-"})
+    return result
+
+
+def provision(name: str = "default", location: str = "CentralUS", ssh_key_path: str = None) -> dict:
     ssh_key_path = os.path.abspath(ssh_key_path or _DEFAULT_SSH_KEY)
     stack = auto.create_or_select_stack(
-        stack_name="dev",
+        stack_name=name,
         project_name="infra-lib",
         program=_make_infrastructure(ssh_key_path),
+        opts=auto.LocalWorkspaceOptions(env_vars={"PULUMI_CONFIG_PASSPHRASE": ""}),
     )
     stack.set_config("azure-native:location", auto.ConfigValue(location))
     result = stack.up(on_output=print)

@@ -1,5 +1,13 @@
 from dataclasses import dataclass, field
 from typing import Optional
+import re
+
+_DOMAIN_RE = re.compile(r"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$")
+
+
+def _validate_domain(name: str):
+    if not _DOMAIN_RE.match(name):
+        raise ValueError(f"Invalid domain name: {name!r}")
 
 
 def _default_caddyfile() -> str:
@@ -29,6 +37,9 @@ class BYODomain(Domain):
     name: str
     proxied: bool = False
 
+    def __post_init__(self):
+        _validate_domain(self.name)
+
     def caddyfile_host(self) -> str:
         return f"http://{self.name}" if self.proxied else self.name
 
@@ -40,6 +51,9 @@ class CloudflareDomain(Domain):
     api_token: str
     zone_id: Optional[str] = None
     proxied: bool = False
+
+    def __post_init__(self):
+        _validate_domain(self.name)
 
     def caddyfile_host(self) -> str:
         return f"http://{self.name}" if self.proxied else self.name
