@@ -4,10 +4,16 @@ import sys
 from . import deploy
 from ._domain import BYODomain, CloudflareDomain
 from ._provision import list_deployments, destroy
-from ._auth import auth_azure
+from ._auth import auth_azure, load_azure_credentials
+from ._resolve import resolve_azure_size
+from ._spec import VMSpec
 
 
 def cmd_deploy(args):
+    if args.source and not os.path.isdir(args.source):
+        print(f"error: source must be a directory: {args.source}")
+        sys.exit(1)
+
     strategy = args.domain_strategy
     if args.domain and strategy is None:
         strategy = "own"
@@ -34,10 +40,41 @@ def cmd_deploy(args):
         domain=domain,
         location=args.location,
         ssh_key_path=args.ssh_key,
+        install=args.install,
     )
     print(f"Deployed successfully.")
     print(f"  IP:  {result.ip}")
     print(f"  URL: {result.url}")
+
+
+def cmd_sizes(args):
+    try:
+        load_azure_credentials()
+        from ._resolve import _azure_size_specs, _azure_list_sizes
+        specs = _azure_size_specs(args.location, _make_credential())
+        prices = _azure_list_sizes(args.location)
+        candidates = [
+            s for s in specs
+            if s["cpu"] >= args.cpu and s["ram_gb"] >= args.ram and s["name"] in prices
+        ]
+        candidates.sort(key=lambda s: prices.get(s["name"], 9999))
+        print(f"{'NAME':<30} {'CPU':>4} {'RAM GB':>8} {'$/HR':>8}")
+        print("-" * 55)
+        for s in candidates[:20]:
+            print(f"{s['name']:<30} {s['cpu']:>4} {s['ram_gb']:>8.1f} {prices.get(s['name'], 0):>8.4f}")
+    except Exception as e:
+        print(f"error: {e}")
+        sys.exit(1)
+
+
+def _make_credential():
+    from azure.identity import ClientSecretCredential
+    import os
+    return ClientSecretCredential(
+        tenant_id=os.environ["ARM_TENANT_ID"],
+        client_id=os.environ["ARM_CLIENT_ID"],
+        client_secret=os.environ["ARM_CLIENT_SECRET"],
+    )
 
 
 def cmd_auth(args):
@@ -79,7 +116,7 @@ def main():
 
     # deploy
     p_deploy = subparsers.add_parser("deploy", help="Deploy a directory")
-    p_deploy.add_argument("source", help="Path to the directory to deploy")
+    p_deploy.add_argument("source", nargs="?", default=None, help="Path to the directory to deploy (optional)")
     p_deploy.add_argument("--name", default="default", help="Deployment name (default: default)")
     p_deploy.add_argument("--provider", default="azure", choices=["azure"])
     p_deploy.add_argument("--location", default="CentralUS")
@@ -88,6 +125,14 @@ def main():
     p_deploy.add_argument("--domain-strategy", default=None, choices=["own", "cloudflare", "http"])
     p_deploy.add_argument("--proxied", action="store_true")
     p_deploy.add_argument("--cloudflare-token", default=None)
+    p_deploy.add_argument("--install", default=None, help="Shell command to run on the VM after deploy")
+
+    # sizes
+    p_sizes = subparsers.add_parser("sizes", help="List available VM sizes for given specs")
+    p_sizes.add_argument("--provider", default="azure", choices=["azure"])
+    p_sizes.add_argument("--location", default="CentralUS")
+    p_sizes.add_argument("--cpu", type=int, default=1)
+    p_sizes.add_argument("--ram", type=float, default=1)
 
     # auth
     p_auth = subparsers.add_parser("auth", help="Authenticate with a cloud provider")
@@ -102,7 +147,9 @@ def main():
 
     args = parser.parse_args()
 
-    if args.command == "auth":
+    if args.command == "sizes":
+        cmd_sizes(args)
+    elif args.command == "auth":
         cmd_auth(args)
     elif args.command == "deploy":
         cmd_deploy(args)

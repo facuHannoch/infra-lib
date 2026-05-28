@@ -7,7 +7,7 @@ from pulumi_azure_native import resources, network, compute
 _DEFAULT_SSH_KEY = os.path.expanduser("~/.infra-lib/keys/default_id_rsa")
 
 
-def _make_infrastructure(ssh_key_path: str):
+def _make_infrastructure(ssh_key_path: str, vm_size: str = "Standard_D2s_v3"):
     def _infrastructure():
         with open(f"{ssh_key_path}.pub") as f:
             ssh_public_key = f.read().strip()
@@ -105,7 +105,7 @@ systemctl start caddy
         compute.VirtualMachine(
             "vm",
             resource_group_name=rg.name,
-            hardware_profile={"vm_size": "Standard_D2s_v3"},
+            hardware_profile={"vm_size": vm_size},
             opts=pulumi.ResourceOptions(ignore_changes=["osProfile"]),
             os_profile={
                 "computer_name": "infra-lib-vm",
@@ -183,14 +183,21 @@ def list_deployments() -> list:
     return result
 
 
-def provision(name: str = "default", location: str = "CentralUS", ssh_key_path: str = None) -> dict:
+def provision(name: str = "default", location: str = "CentralUS", ssh_key_path: str = None, vm_spec=None) -> dict:
     from ._auth import load_azure_credentials
+    from ._spec import VMSpec
+    from ._resolve import resolve_azure_size
     load_azure_credentials()
+
+    spec = vm_spec or VMSpec()
+    resolved = resolve_azure_size(spec, location)
+    print(f"  Selected VM size: {resolved}")
+    _resolved_vm_size = resolved.name
     ssh_key_path = os.path.abspath(ssh_key_path or _DEFAULT_SSH_KEY)
     stack = auto.create_or_select_stack(
         stack_name=name,
         project_name="infra-lib",
-        program=_make_infrastructure(ssh_key_path),
+        program=_make_infrastructure(ssh_key_path, _resolved_vm_size),
         opts=auto.LocalWorkspaceOptions(env_vars={"PULUMI_CONFIG_PASSPHRASE": ""}),
     )
     stack.set_config("azure-native:location", auto.ConfigValue(location))

@@ -48,30 +48,56 @@ def _arm_request(method: str, url: str, token: str, body: dict = None):
         return json.loads(resp.read()) if resp.length != 0 else {}
 
 
+def _decode_jwt_payload(token: str) -> dict:
+    import base64
+    payload = token.split(".")[1]
+    payload += "=" * (-len(payload) % 4)
+    return json.loads(base64.urlsafe_b64decode(payload))
+
+
 def auth_azure():
     from azure.identity import DeviceCodeCredential
-    from azure.mgmt.subscription import SubscriptionClient
 
-    credential = DeviceCodeCredential()
+    credential = DeviceCodeCredential(additionally_allowed_tenants=["*"])
 
-    # pick subscription
-    sub_client = SubscriptionClient(credential)
-    subscriptions = list(sub_client.subscriptions.list())
-    if not subscriptions:
+    # get initial token (triggers device code flow once)
+    arm_token = credential.get_token("https://management.azure.com/.default").token
+
+    # discover all tenants this user has access to
+    tenants_data = _arm_request("GET", "https://management.azure.com/tenants?api-version=2022-12-01", arm_token)
+    tenant_ids = [t["tenantId"] for t in tenants_data.get("value", [])]
+
+    # collect subscriptions across all tenants
+    raw_subs = []
+    tenant_id = _decode_jwt_payload(arm_token).get("tid")
+    tenant_tokens = {tenant_id: arm_token}
+
+    for tid in tenant_ids:
+        try:
+            tok = credential.get_token("https://management.azure.com/.default", tenant_id=tid).token
+            tenant_tokens[tid] = tok
+            subs_data = _arm_request("GET", "https://management.azure.com/subscriptions?api-version=2022-12-01", tok)
+            for s in subs_data.get("value", []):
+                s["_tenant_id"] = tid
+                raw_subs.append(s)
+        except Exception:
+            pass
+
+    if not raw_subs:
         raise RuntimeError("No Azure subscriptions found.")
-    if len(subscriptions) == 1:
-        sub = subscriptions[0]
+
+    if len(raw_subs) == 1:
+        raw_sub = raw_subs[0]
     else:
         print("Available subscriptions:")
-        for i, s in enumerate(subscriptions):
-            print(f"  {i+1}. {s.display_name} ({s.subscription_id})")
-        sub = subscriptions[int(input("Select: ")) - 1]
+        for i, s in enumerate(raw_subs):
+            print(f"  {i+1}. {s['displayName']} ({s['subscriptionId']})")
+        raw_sub = raw_subs[int(input("Select: ")) - 1]
 
-    subscription_id = sub.subscription_id
-    tenant_id = sub.tenant_id
-
-    graph_token = credential.get_token("https://graph.microsoft.com/.default").token
-    arm_token = credential.get_token("https://management.azure.com/.default").token
+    subscription_id = raw_sub["subscriptionId"]
+    tenant_id = raw_sub["_tenant_id"]
+    graph_token = credential.get_token("https://graph.microsoft.com/.default", tenant_id=tenant_id).token
+    arm_token = tenant_tokens.get(tenant_id, credential.get_token("https://management.azure.com/.default", tenant_id=tenant_id).token)
 
     # create app registration
     app_name = f"infra-lib-{uuid.uuid4().hex[:8]}"

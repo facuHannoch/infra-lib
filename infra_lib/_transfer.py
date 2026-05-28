@@ -47,28 +47,45 @@ def _write_caddyfile(client: paramiko.SSHClient, caddyfile: str):
         raise RuntimeError(f"Failed to write Caddyfile: {stderr.read().decode()}")
 
 
-def transfer(host: str, source_dir: str, caddyfile: str = None, ssh_key_path: str = None):
+def run_command(host: str, command: str, ssh_key_path: str = None):
+    ssh_key_path = os.path.abspath(ssh_key_path or _DEFAULT_SSH_KEY)
+    _wait_for_ssh(host, ssh_key_path)
+    _wait_for_cloud_init(host, ssh_key_path)
+    client = _connect(host, ssh_key_path)
+    _, stdout, stderr = client.exec_command(command, get_pty=True)
+    for line in stdout:
+        print(line, end="", flush=True)
+    exit_code = stdout.channel.recv_exit_status()
+    client.close()
+    if exit_code != 0:
+        raise RuntimeError(f"Install command failed (exit {exit_code})")
+
+
+def transfer(host: str, source_dir: str = None, caddyfile: str = None, ssh_key_path: str = None):
     ssh_key_path = os.path.abspath(ssh_key_path or _DEFAULT_SSH_KEY)
     _wait_for_ssh(host, ssh_key_path)
     _wait_for_cloud_init(host, ssh_key_path)
 
-    client = _connect(host, ssh_key_path)
-    _, _, stderr = client.exec_command("sudo mkdir -p /srv/files && sudo chown azureuser:azureuser /srv/files")
-    stderr.channel.recv_exit_status()
-    client.close()
+    if source_dir:
+        client = _connect(host, ssh_key_path)
+        dir_name = os.path.basename(source_dir.rstrip("/"))
+        _, _, stderr = client.exec_command(f"sudo mkdir -p /srv/files/{dir_name} && sudo chown -R azureuser:azureuser /srv/files")
+        stderr.channel.recv_exit_status()
+        client.close()
 
-    cmd = [
-        "rsync", "-az", "--delete",
-        "--filter=:- .gitignore",
-    ]
-    for pattern in _ALWAYS_EXCLUDE:
-        cmd += ["--exclude", pattern]
-    cmd += [
-        "-e", f"ssh -i {ssh_key_path} -o StrictHostKeyChecking=no",
-        source_dir.rstrip("/") + "/",
-        f"azureuser@{host}:/srv/files/",
-    ]
-    subprocess.run(cmd, check=True)
+        cmd = [
+            "rsync", "-az", "--delete",
+            "--filter=:- .gitignore",
+        ]
+        for pattern in _ALWAYS_EXCLUDE:
+            cmd += ["--exclude", pattern]
+        dir_name = os.path.basename(source_dir.rstrip("/"))
+        cmd += [
+            "-e", f"ssh -i {ssh_key_path} -o StrictHostKeyChecking=no",
+            source_dir.rstrip("/") + "/",
+            f"azureuser@{host}:/srv/files/{dir_name}/",
+        ]
+        subprocess.run(cmd, check=True)
 
     if caddyfile:
         client = _connect(host, ssh_key_path)
