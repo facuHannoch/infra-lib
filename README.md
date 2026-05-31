@@ -12,6 +12,13 @@ Usage
 infra-lib deploy --name oneFileProject .
 
 infra-lib deploy --name projectWithDomain --domain domain.com
+
+
+#infra-lib down $(infra-lib list -n)
+
+
+infra-lib down test1              # destroys + removes history (default)
+infra-lib down test1 --keep-history  # destroys but keeps Pulumi stack state
 ```
 
 
@@ -29,6 +36,7 @@ infra-lib deploy --name projectWithDomain --domain domain.com
 6. Health
     - wait for url: waits for the resource and pings it ??
 
+- It always searches for an `infra.yml` in the current directory. CLI flags override the values written in the yml
 
 
 - Generated SSH keys are stored in `~/.infra-lib/keys`.
@@ -58,3 +66,8 @@ infra-lib sizes
 - Nice loading indicator, logs of the current step or what the program is doing
     - we should maybe log pulumi output (or give an option to do so) ?
 - docker containers
+
+- If I cancel, then I have to do pulumi cancel
+
+
+# AI-explanation

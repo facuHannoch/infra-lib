@@ -60,9 +60,9 @@ def run_setup(host: str, commands: list[str], ssh_key_path: str = None):
     for i, command in enumerate(commands, 1):
         console.print(f"  [dim]({i}/{len(commands)})[/dim] [bold]{command}[/bold]")
         client = _connect(host, ssh_key_path)
-        _, stdout, _ = client.exec_command(command, get_pty=True)
-        for line in stdout:
-            clean = line.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
+        _, stdout, stderr = client.exec_command(command)
+        for line in iter(stdout.readline, ""):
+            clean = line.rstrip("\n").rstrip("\r")
             if clean.strip():
                 console.print(f"    [dim]{clean}[/dim]")
         exit_code = stdout.channel.recv_exit_status()

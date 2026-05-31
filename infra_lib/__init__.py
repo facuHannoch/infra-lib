@@ -5,7 +5,7 @@ from ._transfer import transfer, run_command, run_setup
 from ._domain import Domain, BYODomain, CloudflareDomain, _default_caddyfile
 from ._keys import ensure_key, key_path
 from ._spec import VMSpec
-from ._health import wait_for_url
+from ._health import wait_for_url, wait_for_port, check_port
 from ._progress import console, step, done
 
 
@@ -63,16 +63,25 @@ def deploy(
 
     url = domain.url() if domain else (f"http://{ip}" if has_content else None)
 
-    if url and sys.stdin.isatty():
-        try:
-            import questionary
-            test = questionary.confirm("Test connection?", default=True).ask()
-        except ImportError:
-            test = input("Test connection? [Y/n] ").strip().lower() not in ("n", "no")
+    if url:
+        # If app port specified, check it's actually listening before hitting the URL
+        if port:
+            up = wait_for_port(ip, port, ssh_key_path)
+            if not up:
+                warn(f"App is not listening on port {port} after 60s.")
+                warn("Check your setup commands started the app, or SSH in and inspect logs.")
+
+        if sys.stdin.isatty():
+            try:
+                import questionary
+                test = questionary.confirm("Test connection?", default=True).ask()
+            except ImportError:
+                test = input("Test connection? [Y/n] ").strip().lower() not in ("n", "no")
+        else:
+            test = True
+
         if test:
             wait_for_url(url)
-    elif url:
-        wait_for_url(url)
 
     console.print(f"\n[bold green]Deployed![/bold green]  [cyan]{url or ip}[/cyan]")
     return DeployResult(url=url or ip, ip=ip)

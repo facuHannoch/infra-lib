@@ -145,15 +145,21 @@ systemctl start caddy
     return _infrastructure
 
 
-def destroy(name: str):
+def destroy(name: str, purge: bool = True):
+    from pulumi.automation.errors import ConcurrentUpdateError
     stack = auto.select_stack(
         stack_name=name,
         project_name="infra-lib",
         program=lambda: None,
         opts=auto.LocalWorkspaceOptions(env_vars={"PULUMI_CONFIG_PASSPHRASE": ""}),
     )
-    stack.destroy(on_output=print)
-    stack.workspace.remove_stack(name)
+    try:
+        stack.destroy(on_output=print)
+    except ConcurrentUpdateError:
+        stack.cancel()
+        stack.destroy(on_output=print)
+    if purge:
+        stack.workspace.remove_stack(name)
 
 
 def list_deployments() -> list:
@@ -210,10 +216,8 @@ def provision(name: str = "default", location: str = "CentralUS", ssh_key_path: 
     try:
         result = stack.up(on_output=lambda s: (sys.stdout.write(s + "\n"), sys.stdout.flush()))
     except ConcurrentUpdateError:
-        raise RuntimeError(
-            f"Stack '{name}' is locked by a previous interrupted run.\n"
-            f"  Fix: PULUMI_CONFIG_PASSPHRASE='' pulumi cancel --stack organization/infra-lib/{name} --yes"
-        )
+        stack.cancel()
+        result = stack.up(on_output=lambda s: (sys.stdout.write(s + "\n"), sys.stdout.flush()))
     console.rule(style="dim")
     done("Infrastructure ready")
     return {k: v.value for k, v in result.outputs.items()}

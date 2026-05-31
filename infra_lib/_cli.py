@@ -120,18 +120,24 @@ def cmd_auth(args):
 
 
 def cmd_down(args):
-    try:
-        destroy(args.name)
-        print(f"Deployment '{args.name}' destroyed.")
-    except Exception as e:
-        print(f"error: {e}")
-        sys.exit(1)
+    for name in args.names:
+        try:
+            destroy(name, purge=not args.keep_history)
+            print(f"Deployment '{name}' destroyed.")
+        except Exception as e:
+            print(f"error: {e}")
+            sys.exit(1)
 
 
 def cmd_list(args):
     deployments = list_deployments()
     if not deployments:
-        print("No deployments found.")
+        if not args.names:
+            print("No deployments found.")
+        return
+    if args.names:
+        for d in deployments:
+            print(d["name"])
         return
     fmt = "{:<20} {:<16} {:<40} {}"
     print(fmt.format("NAME", "IP", "URL", "SSH KEY"))
@@ -173,10 +179,12 @@ def main():
 
     # down
     p_down = subparsers.add_parser("down", help="Destroy a deployment")
-    p_down.add_argument("--name", default="default", help="Deployment name to destroy (default: default)")
+    p_down.add_argument("names", nargs="+", metavar="NAME", help="Deployment name(s) to destroy")
+    p_down.add_argument("--keep-history", action="store_true", help="Keep Pulumi stack history and config")
 
     # list
     p_list = subparsers.add_parser("list", help="List all deployments")
+    p_list.add_argument("-n", "--names", action="store_true", help="Print names only, one per line")
 
     args = parser.parse_args()
 
