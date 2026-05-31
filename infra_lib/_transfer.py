@@ -2,6 +2,7 @@ import os
 import subprocess
 import time
 import paramiko
+from ._progress import console, step, done
 
 _DEFAULT_SSH_KEY = os.path.expanduser("~/.infra-lib/keys/default_id_rsa")
 
@@ -18,20 +19,24 @@ def _connect(host: str, ssh_key_path: str) -> paramiko.SSHClient:
 
 def _wait_for_ssh(host: str, ssh_key_path: str, timeout: int = 300):
     deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            _connect(host, ssh_key_path).close()
-            return
-        except Exception:
-            time.sleep(5)
+    with console.status("[bold]Waiting for VM to accept SSH...", spinner="dots"):
+        while time.time() < deadline:
+            try:
+                _connect(host, ssh_key_path).close()
+                done("VM is up")
+                return
+            except Exception:
+                time.sleep(5)
     raise TimeoutError(f"SSH not available on {host} after {timeout}s")
 
 
 def _wait_for_cloud_init(host: str, ssh_key_path: str):
-    client = _connect(host, ssh_key_path)
-    _, stdout, _ = client.exec_command("cloud-init status --wait")
-    stdout.channel.recv_exit_status()
-    client.close()
+    with console.status("[bold]Waiting for cloud-init (installing Caddy)...", spinner="dots"):
+        client = _connect(host, ssh_key_path)
+        _, stdout, _ = client.exec_command("cloud-init status --wait")
+        stdout.channel.recv_exit_status()
+        client.close()
+    done("Cloud-init complete")
 
 
 def _write_caddyfile(client: paramiko.SSHClient, caddyfile: str):
@@ -51,14 +56,16 @@ def run_command(host: str, command: str, ssh_key_path: str = None):
     ssh_key_path = os.path.abspath(ssh_key_path or _DEFAULT_SSH_KEY)
     _wait_for_ssh(host, ssh_key_path)
     _wait_for_cloud_init(host, ssh_key_path)
+    step("Running install command")
     client = _connect(host, ssh_key_path)
     _, stdout, stderr = client.exec_command(command, get_pty=True)
     for line in stdout:
-        print(line, end="", flush=True)
+        console.print(f"  [dim]{line}[/dim]", end="")
     exit_code = stdout.channel.recv_exit_status()
     client.close()
     if exit_code != 0:
         raise RuntimeError(f"Install command failed (exit {exit_code})")
+    done("Install complete")
 
 
 def transfer(host: str, source_dir: str = None, caddyfile: str = None, ssh_key_path: str = None):
@@ -67,6 +74,7 @@ def transfer(host: str, source_dir: str = None, caddyfile: str = None, ssh_key_p
     _wait_for_cloud_init(host, ssh_key_path)
 
     if source_dir:
+        step(f"Syncing files from [bold]{source_dir}[/bold]")
         client = _connect(host, ssh_key_path)
         dir_name = os.path.basename(source_dir.rstrip("/"))
         _, _, stderr = client.exec_command(f"sudo mkdir -p /srv/files/{dir_name} && sudo chown -R azureuser:azureuser /srv/files")
@@ -79,15 +87,17 @@ def transfer(host: str, source_dir: str = None, caddyfile: str = None, ssh_key_p
         ]
         for pattern in _ALWAYS_EXCLUDE:
             cmd += ["--exclude", pattern]
-        dir_name = os.path.basename(source_dir.rstrip("/"))
         cmd += [
             "-e", f"ssh -i {ssh_key_path} -o StrictHostKeyChecking=no",
             source_dir.rstrip("/") + "/",
             f"azureuser@{host}:/srv/files/{dir_name}/",
         ]
         subprocess.run(cmd, check=True)
+        done("Files synced")
 
     if caddyfile:
+        step("Configuring web server")
         client = _connect(host, ssh_key_path)
         _write_caddyfile(client, caddyfile)
         client.close()
+        done("Caddy configured")

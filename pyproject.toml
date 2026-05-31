@@ -15,6 +15,7 @@ dependencies = [
     "azure-mgmt-authorization>=3.0.0",
     "azure-mgmt-compute>=30.0.0",
     "questionary>=2.0.0",
+    "rich>=13.0.0",
 ]
 
 [project.scripts]

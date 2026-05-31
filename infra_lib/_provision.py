@@ -190,9 +190,11 @@ def provision(name: str = "default", location: str = "CentralUS", ssh_key_path: 
     from ._resolve import resolve_azure_size
     load_azure_credentials()
 
+    from ._progress import console, step, done
     spec = vm_spec or VMSpec()
-    resolved = resolve_azure_size(spec, location)
-    print(f"  Selected VM size: {resolved}")
+    with console.status(f"[bold]Checking availability in {location}...", spinner="dots"):
+        resolved = resolve_azure_size(spec, location)
+    console.print(f"  [dim]VM:[/dim] {resolved}")
     ssh_key_path = os.path.abspath(ssh_key_path or _DEFAULT_SSH_KEY)
     stack = auto.create_or_select_stack(
         stack_name=name,
@@ -201,5 +203,17 @@ def provision(name: str = "default", location: str = "CentralUS", ssh_key_path: 
         opts=auto.LocalWorkspaceOptions(env_vars={"PULUMI_CONFIG_PASSPHRASE": ""}),
     )
     stack.set_config("azure-native:location", auto.ConfigValue(location))
-    result = stack.up(on_output=print)
+    step("Provisioning infrastructure")
+    console.rule("[dim]pulumi[/dim]", style="dim")
+    import sys
+    from pulumi.automation.errors import ConcurrentUpdateError
+    try:
+        result = stack.up(on_output=lambda s: (sys.stdout.write(s + "\n"), sys.stdout.flush()))
+    except ConcurrentUpdateError:
+        raise RuntimeError(
+            f"Stack '{name}' is locked by a previous interrupted run.\n"
+            f"  Fix: PULUMI_CONFIG_PASSPHRASE='' pulumi cancel --stack organization/infra-lib/{name} --yes"
+        )
+    console.rule(style="dim")
+    done("Infrastructure ready")
     return {k: v.value for k, v in result.outputs.items()}

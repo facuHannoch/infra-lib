@@ -53,4 +53,5 @@ infra-lib sizes
     - More options
     - UI view ?
 - Nice loading indicator, logs of the current step or what the program is doing
+    - we should maybe log pulumi output (or give an option to do so) ?
 - docker containers

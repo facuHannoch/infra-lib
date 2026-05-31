@@ -67,10 +67,12 @@ def _azure_list_sizes(location: str) -> dict:
         return sizes
     except Exception:
         if os.path.exists(cache_file):
-            print("  Warning: Azure pricing API unavailable, using cached prices.")
+            from ._progress import warn
+            warn("Azure pricing API unavailable, using cached prices.")
             with open(cache_file) as f:
                 return json.load(f)
-        print("  Warning: Azure pricing API unavailable, using built-in fallback prices.")
+        from ._progress import warn
+        warn("Azure pricing API unavailable, using built-in fallback prices.")
         return _FALLBACK_PRICES
 
 
