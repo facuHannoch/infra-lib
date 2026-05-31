@@ -4,6 +4,8 @@ import pulumi
 from pulumi import automation as auto
 from pulumi_azure_native import resources, network, compute
 
+from ... import progress
+
 _DEFAULT_SSH_KEY = os.path.expanduser("~/.infra-lib/keys/default_id_rsa")
 
 
@@ -169,6 +171,7 @@ def list_deployments() -> list:
     )
     stacks = ws.list_stacks()
     result = []
+    from ...core.keys import key_path
     for stack_summary in stacks:
         try:
             stack = auto.select_stack(
@@ -178,7 +181,6 @@ def list_deployments() -> list:
                 opts=auto.LocalWorkspaceOptions(env_vars={"PULUMI_CONFIG_PASSPHRASE": ""}),
             )
             outputs = {k: v.value for k, v in stack.outputs().items()}
-            from ._keys import key_path
             result.append({
                 "name": stack_summary.name,
                 "ip": outputs.get("public_ip", "-"),
@@ -191,16 +193,16 @@ def list_deployments() -> list:
 
 
 def provision(name: str = "default", location: str = "CentralUS", ssh_key_path: str = None, vm_spec=None) -> dict:
-    from ._auth import load_azure_credentials
-    from ._spec import VMSpec
-    from ._resolve import resolve_azure_size
+    from .auth import load_azure_credentials
+    from .sizes import resolve_azure_size
+    from ...models import VMSpec
     load_azure_credentials()
 
-    from ._progress import console, step, done
     spec = vm_spec or VMSpec()
-    with console.status(f"[bold]Checking availability in {location}...", spinner="dots"):
+    with progress.status(f"Checking availability in {location}..."):
         resolved = resolve_azure_size(spec, location)
-    console.print(f"  [dim]VM:[/dim] {resolved}")
+    progress.raw(f"  VM: {resolved}")
+
     ssh_key_path = os.path.abspath(ssh_key_path or _DEFAULT_SSH_KEY)
     stack = auto.create_or_select_stack(
         stack_name=name,
@@ -209,15 +211,13 @@ def provision(name: str = "default", location: str = "CentralUS", ssh_key_path: 
         opts=auto.LocalWorkspaceOptions(env_vars={"PULUMI_CONFIG_PASSPHRASE": ""}),
     )
     stack.set_config("azure-native:location", auto.ConfigValue(location))
-    step("Provisioning infrastructure")
-    console.rule("[dim]pulumi[/dim]", style="dim")
-    import sys
+
+    progress.step("Provisioning infrastructure")
     from pulumi.automation.errors import ConcurrentUpdateError
     try:
-        result = stack.up(on_output=lambda s: (sys.stdout.write(s + "\n"), sys.stdout.flush()))
+        result = stack.up(on_output=progress.raw)
     except ConcurrentUpdateError:
         stack.cancel()
-        result = stack.up(on_output=lambda s: (sys.stdout.write(s + "\n"), sys.stdout.flush()))
-    console.rule(style="dim")
-    done("Infrastructure ready")
+        result = stack.up(on_output=progress.raw)
+    progress.done("Infrastructure ready")
     return {k: v.value for k, v in result.outputs.items()}

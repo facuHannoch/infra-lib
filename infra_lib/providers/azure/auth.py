@@ -140,8 +140,8 @@ def auth_azure():
         "subscription_id": subscription_id,
     })
 
-    print(f"Authenticated successfully.")
-    print(f"  Subscription: {sub.display_name} ({subscription_id})")
+    print("Authenticated successfully.")
+    print(f"  Subscription: {raw_sub['displayName']} ({subscription_id})")
     print(f"  Credentials saved to {_CREDENTIALS_FILE}")
 
 

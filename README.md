@@ -50,7 +50,38 @@ infra-lib down
 infra-lib list
 
 infra-lib sizes
+
+
+
+# No config — just prompts, works anywhere
+infra-lib deploy
+
+# Opens $EDITOR with a template, deploy after save
+infra-lib deploy --config
+
+# Use a specific file
+infra-lib deploy --config ~/templates/bun-app.yml
+infra-lib deploy --config ./infra.yml
+
+The editor opens with a pre-filled template using the --name you passed (or myapp). Save and quit, it deploys immediately. If you close without
+saving anything meaningful it'll just fall through to prompts.
+
 ```
+
+
+● ps aux | grep bun
+
+  Or if you want to see it by port:
+  ss -tlnp | grep 3409
+
+  To see logs:
+  tail -f /srv/logs/hub.log
+
+  To kill it:
+  kill $(ps aux | grep 'bun run' | grep -v grep | awk '{print $2}')
+
+
+
 
 # Cloud Providers supported
 
@@ -68,6 +99,9 @@ infra-lib sizes
 - docker containers
 
 - If I cancel, then I have to do pulumi cancel
+
+
+
 
 
 # AI-explanation

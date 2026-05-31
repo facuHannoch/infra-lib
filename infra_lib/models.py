@@ -7,10 +7,6 @@ class VMSpec:
     cpu: int = 2
     ram_gb: int = 4
     storage_gb: int = 30
-    # reserved for future use
-    # gpu: bool = False
-    # spot: bool = False
-    # min_network_gbps: float = None
 
 
 @dataclass
@@ -23,3 +19,22 @@ class ResolvedSize:
     def __str__(self):
         price = f"~${self.price_per_hour:.4f}/hr" if self.price_per_hour else "price unknown"
         return f"{self.name} ({self.cpu} vCPU, {self.ram_gb}GB RAM, {price})"
+
+
+@dataclass
+class Service:
+    port: int
+    url: str
+
+
+@dataclass
+class Deployment:
+    name: str
+    ip: str
+    ssh_key: str
+    services: list[Service] = field(default_factory=list)
+    status: str = "unknown"
+
+    @property
+    def url(self) -> Optional[str]:
+        return self.services[0].url if self.services else None

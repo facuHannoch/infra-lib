@@ -2,8 +2,6 @@ import os
 import yaml
 from dataclasses import dataclass, field
 from typing import Optional
-from ._spec import VMSpec
-from ._resolve import AZURE_PRESETS
 
 CONFIG_FILENAME = "infra.yml"
 
@@ -19,12 +17,6 @@ class InfraConfig:
     port: Optional[int] = None
     ship: list[str] = field(default_factory=list)
     setup: list[str] = field(default_factory=list)
-
-    def vm_spec(self) -> VMSpec:
-        preset = AZURE_PRESETS.get(self.vm)
-        if not preset:
-            raise ValueError(f"Unknown vm preset '{self.vm}'. Choose from: {', '.join(AZURE_PRESETS)}")
-        return VMSpec(cpu=preset["cpu"], ram_gb=preset["ram_gb"])
 
 
 def load_config(path: str = None) -> Optional[InfraConfig]:

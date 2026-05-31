@@ -20,7 +20,10 @@ dependencies = [
 ]
 
 [project.scripts]
-infra-lib = "infra_lib._cli:main"
+infra-lib = "infra_lib.cli.main:main"
 
 [tool.setuptools.packages.find]
 include = ["infra_lib*"]
+
+[tool.setuptools.package-data]
+infra_lib = ["templates/*.yml"]

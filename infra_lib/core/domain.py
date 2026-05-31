@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 import re
 
@@ -10,13 +10,16 @@ def _validate_domain(name: str):
         raise ValueError(f"Invalid domain name: {name!r}")
 
 
-def _default_caddyfile(port: int = None) -> str:
+def default_caddyfile(port: int = None) -> str:
     if port:
         return f":80 {{\n    reverse_proxy localhost:{port}\n}}\n"
     return ":80 {\n    root * /srv/files\n    file_server browse\n}\n"
 
 
 class Domain:
+    #: whether provision_dns() wires DNS automatically (vs. user pointing it manually)
+    auto_dns = False
+
     def caddyfile_host(self) -> str:
         raise NotImplementedError
 
@@ -37,9 +40,10 @@ class Domain:
 
 @dataclass
 class BYODomain(Domain):
-    """User already owns the domain and has pointed DNS at the VM IP."""
+    """User already owns the domain and will point DNS at the VM IP."""
     name: str
     proxied: bool = False
+    auto_dns = False
 
     def __post_init__(self):
         _validate_domain(self.name)
@@ -50,11 +54,12 @@ class BYODomain(Domain):
 
 @dataclass
 class CloudflareDomain(Domain):
-    """Wires DNS automatically via Cloudflare API."""
+    """Wires DNS automatically via the Cloudflare API."""
     name: str
     api_token: str
     zone_id: Optional[str] = None
     proxied: bool = False
+    auto_dns = True
 
     def __post_init__(self):
         _validate_domain(self.name)

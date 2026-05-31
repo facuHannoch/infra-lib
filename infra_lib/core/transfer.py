@@ -2,7 +2,8 @@ import os
 import subprocess
 import time
 import paramiko
-from ._progress import console, step, done
+
+from .. import progress
 
 _DEFAULT_SSH_KEY = os.path.expanduser("~/.infra-lib/keys/default_id_rsa")
 
@@ -19,11 +20,11 @@ def _connect(host: str, ssh_key_path: str) -> paramiko.SSHClient:
 
 def _wait_for_ssh(host: str, ssh_key_path: str, timeout: int = 300):
     deadline = time.time() + timeout
-    with console.status("[bold]Waiting for VM to accept SSH...", spinner="dots"):
+    with progress.status("Waiting for VM to accept SSH..."):
         while time.time() < deadline:
             try:
                 _connect(host, ssh_key_path).close()
-                done("VM is up")
+                progress.done("VM is up")
                 return
             except Exception:
                 time.sleep(5)
@@ -31,12 +32,12 @@ def _wait_for_ssh(host: str, ssh_key_path: str, timeout: int = 300):
 
 
 def _wait_for_cloud_init(host: str, ssh_key_path: str):
-    with console.status("[bold]Waiting for cloud-init (installing Caddy)...", spinner="dots"):
+    with progress.status("Waiting for cloud-init (installing Caddy)..."):
         client = _connect(host, ssh_key_path)
         _, stdout, _ = client.exec_command("cloud-init status --wait")
         stdout.channel.recv_exit_status()
         client.close()
-    done("Cloud-init complete")
+    progress.done("Cloud-init complete")
 
 
 def _write_caddyfile(client: paramiko.SSHClient, caddyfile: str):
@@ -56,25 +57,20 @@ def run_setup(host: str, commands: list[str], ssh_key_path: str = None):
     ssh_key_path = os.path.abspath(ssh_key_path or _DEFAULT_SSH_KEY)
     _wait_for_ssh(host, ssh_key_path)
     _wait_for_cloud_init(host, ssh_key_path)
-    step(f"Running setup ({len(commands)} step{'s' if len(commands) != 1 else ''})")
+    progress.step(f"Running setup ({len(commands)} step{'s' if len(commands) != 1 else ''})")
     for i, command in enumerate(commands, 1):
-        console.print(f"  [dim]({i}/{len(commands)})[/dim] [bold]{command}[/bold]")
+        progress.raw(f"  ({i}/{len(commands)}) {command}")
         client = _connect(host, ssh_key_path)
-        _, stdout, stderr = client.exec_command(command)
+        _, stdout, _ = client.exec_command(command)
         for line in iter(stdout.readline, ""):
             clean = line.rstrip("\n").rstrip("\r")
             if clean.strip():
-                console.print(f"    [dim]{clean}[/dim]")
+                progress.raw(f"    {clean}")
         exit_code = stdout.channel.recv_exit_status()
         client.close()
         if exit_code != 0:
             raise RuntimeError(f"Setup step {i} failed (exit {exit_code}): {command}")
-    done("Setup complete")
-
-
-# Keep for backwards compatibility with --install flag
-def run_command(host: str, command: str, ssh_key_path: str = None):
-    run_setup(host, [command], ssh_key_path=ssh_key_path)
+    progress.done("Setup complete")
 
 
 def _rsync_dir(host: str, source_dir: str, ssh_key_path: str):
@@ -109,15 +105,15 @@ def transfer(host: str, source_dir: str = None, ship: list = None, caddyfile: st
         dirs += [d for d in ship if d not in dirs]
 
     if dirs:
-        labels = ", ".join(f"[bold]{os.path.basename(d.rstrip('/'))}[/bold]" for d in dirs)
-        step(f"Shipping {labels}")
+        names = ", ".join(os.path.basename(d.rstrip("/")) for d in dirs)
+        progress.step(f"Shipping {names}")
         for d in dirs:
             _rsync_dir(host, d, ssh_key_path)
-        done(f"Shipped {len(dirs)} director{'y' if len(dirs) == 1 else 'ies'}")
+        progress.done(f"Shipped {len(dirs)} director{'y' if len(dirs) == 1 else 'ies'}")
 
     if caddyfile:
-        step("Configuring web server")
+        progress.step("Configuring web server")
         client = _connect(host, ssh_key_path)
         _write_caddyfile(client, caddyfile)
         client.close()
-        done("Caddy configured")
+        progress.done("Caddy configured")

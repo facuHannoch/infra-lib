@@ -1,13 +1,15 @@
-name: myagent
-vm: small
-port: 3000
+name: {name}
+vm: small          # micro, small, medium, large
+# port: 3000       # expose app port via reverse proxy
+# location: CentralUS
 
-ship:
-  - .
-  - ../my-lib
+# ship:
+#   - .            # directories to rsync to the VM
+#   - ../my-lib
 
-setup:
-  - sudo apt install -y unzip
-  - curl -fsSL https://bun.sh/install | bash
-  - source ~/.bashrc && cd /srv/files/myagent && bun install
-  - source ~/.bashrc && cd /srv/files/myagent && bun run start &
+# setup:           # shell commands to run after ship
+#   - sudo apt install -y unzip
+#   - curl -fsSL https://bun.sh/install | bash
+
+# domain: myapp.example.com
+# domain_strategy: own   # own or cloudflare

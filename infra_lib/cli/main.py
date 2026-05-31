@@ -1,19 +1,58 @@
 import argparse
 import os
 import sys
-from . import deploy
-from ._domain import BYODomain, CloudflareDomain
-from ._provision import list_deployments, destroy
-from ._auth import auth_azure, load_azure_credentials
-from ._resolve import resolve_azure_size, AZURE_PRESETS
-from ._spec import VMSpec
-from ._tui import prompt_vm_spec
-from ._config import load_config
+
+from .. import progress
+from ..pipeline import deploy, list_deployments, destroy
+from ..core.domain import BYODomain, CloudflareDomain
+from ..providers.azure.auth import auth_azure, load_azure_credentials
+from ..providers.azure.sizes import AZURE_PRESETS
+from ..config import load_config
+from .tui import prompt_vm_spec
+from .reporter import ConsoleReporter
+
+
+def _template_path() -> str:
+    # templates live at the package root, one level up from cli/
+    return os.path.join(os.path.dirname(os.path.dirname(__file__)), "templates", "infra.yml")
+
+
+def _load_template() -> str:
+    with open(_template_path()) as f:
+        return f.read()
+
+
+def _open_editor_config(name: str) -> str:
+    import tempfile, subprocess
+    editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "nano"
+    with tempfile.NamedTemporaryFile(suffix=".yml", mode="w", delete=False) as f:
+        f.write(_load_template().format(name=name))
+        tmp = f.name
+    subprocess.call([editor, tmp])
+    with open(tmp) as f:
+        content = f.read()
+    os.unlink(tmp)
+    return content
 
 
 def cmd_deploy(args):
-    # Load infra.yml if present; CLI flags override config values
-    cfg = load_config()
+    # Resolve config: --config with path, --config alone (editor), or auto infra.yml
+    if args.config is None:
+        cfg = load_config()
+    elif args.config == "":
+        import tempfile
+        name_hint = args.name if args.name != "default" else "myapp"
+        content = _open_editor_config(name_hint)
+        with tempfile.NamedTemporaryFile(suffix=".yml", mode="w", delete=False) as f:
+            f.write(content)
+            tmp = f.name
+        cfg = load_config(tmp)
+        os.unlink(tmp)
+    else:
+        cfg = load_config(args.config)
+        if cfg is None:
+            print(f"error: config file not found: {args.config}")
+            sys.exit(1)
 
     source = args.source
     name = args.name if args.name != "default" else (cfg.name if cfg else "default")
@@ -47,24 +86,16 @@ def cmd_deploy(args):
         print(f"error: {e}")
         sys.exit(1)
 
-    # VM spec: --vm flag > config > TUI prompt
-    vm_label = args.vm or (cfg.vm if cfg else None)
-    if vm_label:
-        preset = AZURE_PRESETS.get(vm_label)
-        if not preset:
-            print(f"error: unknown VM size '{vm_label}'. Choose from: {', '.join(AZURE_PRESETS)}")
-            sys.exit(1)
-        vm_spec = VMSpec(cpu=preset["cpu"], ram_gb=preset["ram_gb"])
-    else:
-        vm_spec = prompt_vm_spec()
+    # VM: --vm flag > config > TUI prompt (all yield a preset label)
+    vm = args.vm or (cfg.vm if cfg else None) or prompt_vm_spec()
 
-    setup = cfg.setup if cfg else []
+    setup = list(cfg.setup) if cfg else []
     if args.install:
-        setup = setup + [args.install]
+        setup.append(args.install)
 
     port = args.port or (cfg.port if cfg else None)
 
-    result = deploy(
+    deploy(
         source=source,
         name=name,
         domain=domain,
@@ -72,15 +103,24 @@ def cmd_deploy(args):
         ssh_key_path=args.ssh_key,
         ship=ship,
         setup=setup,
-        vm=vm_spec,
+        vm=vm,
         port=port,
+    )
+
+
+def _make_credential():
+    from azure.identity import ClientSecretCredential
+    return ClientSecretCredential(
+        tenant_id=os.environ["ARM_TENANT_ID"],
+        client_id=os.environ["ARM_CLIENT_ID"],
+        client_secret=os.environ["ARM_CLIENT_SECRET"],
     )
 
 
 def cmd_sizes(args):
     try:
         load_azure_credentials()
-        from ._resolve import _azure_size_specs, _azure_list_sizes
+        from ..providers.azure.sizes import _azure_size_specs, _azure_list_sizes
         specs = _azure_size_specs(args.location, _make_credential())
         prices = _azure_list_sizes(args.location)
         candidates = [
@@ -95,16 +135,6 @@ def cmd_sizes(args):
     except Exception as e:
         print(f"error: {e}")
         sys.exit(1)
-
-
-def _make_credential():
-    from azure.identity import ClientSecretCredential
-    import os
-    return ClientSecretCredential(
-        tenant_id=os.environ["ARM_TENANT_ID"],
-        client_id=os.environ["ARM_CLIENT_ID"],
-        client_secret=os.environ["ARM_CLIENT_SECRET"],
-    )
 
 
 def cmd_auth(args):
@@ -137,16 +167,18 @@ def cmd_list(args):
         return
     if args.names:
         for d in deployments:
-            print(d["name"])
+            print(d.name)
         return
     fmt = "{:<20} {:<16} {:<40} {}"
     print(fmt.format("NAME", "IP", "URL", "SSH KEY"))
     print("-" * 100)
     for d in deployments:
-        print(fmt.format(d["name"], d.get("ip", "-"), d.get("url", "-"), d.get("ssh_key", "-")))
+        print(fmt.format(d.name, d.ip or "-", d.url or "-", d.ssh_key or "-"))
 
 
 def main():
+    progress.set_reporter(ConsoleReporter())
+
     parser = argparse.ArgumentParser(prog="infra-lib", description="Deploy a directory to the cloud.")
     subparsers = parser.add_subparsers(dest="command")
 
@@ -165,6 +197,8 @@ def main():
     p_deploy.add_argument("--port", type=int, default=None, help="App port to expose via reverse proxy")
     p_deploy.add_argument("--vm", default=None, choices=list(AZURE_PRESETS), metavar="SIZE",
                           help=f"VM size preset: {', '.join(AZURE_PRESETS)} (skips interactive prompt)")
+    p_deploy.add_argument("--config", nargs="?", const="", default=None, metavar="FILE",
+                          help="Config file to use. Omit path to open an editor.")
 
     # sizes
     p_sizes = subparsers.add_parser("sizes", help="List available VM sizes for given specs")

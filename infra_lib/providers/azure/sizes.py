@@ -3,7 +3,9 @@ import os
 import time
 import urllib.request
 import urllib.parse
-from ._spec import VMSpec, ResolvedSize
+
+from ...models import VMSpec, ResolvedSize
+from ...progress import warn
 
 _CACHE_DIR = os.path.expanduser("~/.infra-lib/cache")
 _CACHE_TTL = 86400  # 24 hours
@@ -11,7 +13,7 @@ _CACHE_TTL = 86400  # 24 hours
 # Known-good Azure sizes used as fallback when pricing API is unavailable.
 # Prices are approximate on-demand rates in USD/hr (CentralUS, as of 2024).
 AZURE_PRESETS = {
-    "micro":  {"sku": "Standard_B1s",   "cpu": 1, "ram_gb": 1,  "price": 0.011},
+    "micro":  {"sku": "Standard_B1s",    "cpu": 1, "ram_gb": 1,  "price": 0.011},
     "small":  {"sku": "Standard_D2s_v3", "cpu": 2, "ram_gb": 8,  "price": 0.096},
     "medium": {"sku": "Standard_D4s_v3", "cpu": 4, "ram_gb": 16, "price": 0.192},
     "large":  {"sku": "Standard_D8s_v3", "cpu": 8, "ram_gb": 32, "price": 0.384},
@@ -67,11 +69,9 @@ def _azure_list_sizes(location: str) -> dict:
         return sizes
     except Exception:
         if os.path.exists(cache_file):
-            from ._progress import warn
             warn("Azure pricing API unavailable, using cached prices.")
             with open(cache_file) as f:
                 return json.load(f)
-        from ._progress import warn
         warn("Azure pricing API unavailable, using built-in fallback prices.")
         return _FALLBACK_PRICES
 
@@ -79,7 +79,6 @@ def _azure_list_sizes(location: str) -> dict:
 def _azure_size_specs(location: str, credential) -> list[dict]:
     """Fetch VM size specs (CPU, RAM, architecture) from Azure resource SKUs API."""
     from azure.mgmt.compute import ComputeManagementClient
-    import os
 
     subscription_id = os.environ.get("ARM_SUBSCRIPTION_ID", "")
     client = ComputeManagementClient(credential, subscription_id)
@@ -103,7 +102,6 @@ def _azure_size_specs(location: str, credential) -> list[dict]:
 
 def resolve_azure_size(spec: VMSpec, location: str) -> ResolvedSize:
     from azure.identity import ClientSecretCredential
-    import os
 
     credential = ClientSecretCredential(
         tenant_id=os.environ["ARM_TENANT_ID"],
