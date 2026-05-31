@@ -52,48 +52,66 @@ def _write_caddyfile(client: paramiko.SSHClient, caddyfile: str):
         raise RuntimeError(f"Failed to write Caddyfile: {stderr.read().decode()}")
 
 
-def run_command(host: str, command: str, ssh_key_path: str = None):
+def run_setup(host: str, commands: list[str], ssh_key_path: str = None):
     ssh_key_path = os.path.abspath(ssh_key_path or _DEFAULT_SSH_KEY)
     _wait_for_ssh(host, ssh_key_path)
     _wait_for_cloud_init(host, ssh_key_path)
-    step("Running install command")
-    client = _connect(host, ssh_key_path)
-    _, stdout, stderr = client.exec_command(command, get_pty=True)
-    for line in stdout:
-        console.print(f"  [dim]{line}[/dim]", end="")
-    exit_code = stdout.channel.recv_exit_status()
-    client.close()
-    if exit_code != 0:
-        raise RuntimeError(f"Install command failed (exit {exit_code})")
-    done("Install complete")
-
-
-def transfer(host: str, source_dir: str = None, caddyfile: str = None, ssh_key_path: str = None):
-    ssh_key_path = os.path.abspath(ssh_key_path or _DEFAULT_SSH_KEY)
-    _wait_for_ssh(host, ssh_key_path)
-    _wait_for_cloud_init(host, ssh_key_path)
-
-    if source_dir:
-        step(f"Syncing files from [bold]{source_dir}[/bold]")
+    step(f"Running setup ({len(commands)} step{'s' if len(commands) != 1 else ''})")
+    for i, command in enumerate(commands, 1):
+        console.print(f"  [dim]({i}/{len(commands)})[/dim] [bold]{command}[/bold]")
         client = _connect(host, ssh_key_path)
-        dir_name = os.path.basename(source_dir.rstrip("/"))
-        _, _, stderr = client.exec_command(f"sudo mkdir -p /srv/files/{dir_name} && sudo chown -R azureuser:azureuser /srv/files")
-        stderr.channel.recv_exit_status()
+        _, stdout, _ = client.exec_command(command, get_pty=True)
+        for line in stdout:
+            console.print(f"    [dim]{line}[/dim]", end="")
+        exit_code = stdout.channel.recv_exit_status()
         client.close()
+        if exit_code != 0:
+            raise RuntimeError(f"Setup step {i} failed (exit {exit_code}): {command}")
+    done("Setup complete")
 
-        cmd = [
-            "rsync", "-az", "--delete",
-            "--filter=:- .gitignore",
-        ]
-        for pattern in _ALWAYS_EXCLUDE:
-            cmd += ["--exclude", pattern]
-        cmd += [
-            "-e", f"ssh -i {ssh_key_path} -o StrictHostKeyChecking=no",
-            source_dir.rstrip("/") + "/",
-            f"azureuser@{host}:/srv/files/{dir_name}/",
-        ]
-        subprocess.run(cmd, check=True)
-        done("Files synced")
+
+# Keep for backwards compatibility with --install flag
+def run_command(host: str, command: str, ssh_key_path: str = None):
+    run_setup(host, [command], ssh_key_path=ssh_key_path)
+
+
+def _rsync_dir(host: str, source_dir: str, ssh_key_path: str):
+    client = _connect(host, ssh_key_path)
+    dir_name = os.path.basename(source_dir.rstrip("/"))
+    _, _, stderr = client.exec_command(
+        f"sudo mkdir -p /srv/files/{dir_name} && sudo chown -R azureuser:azureuser /srv/files"
+    )
+    stderr.channel.recv_exit_status()
+    client.close()
+
+    cmd = ["rsync", "-az", "--delete", "--filter=:- .gitignore"]
+    for pattern in _ALWAYS_EXCLUDE:
+        cmd += ["--exclude", pattern]
+    cmd += [
+        "-e", f"ssh -i {ssh_key_path} -o StrictHostKeyChecking=no",
+        source_dir.rstrip("/") + "/",
+        f"azureuser@{host}:/srv/files/{dir_name}/",
+    ]
+    subprocess.run(cmd, check=True)
+
+
+def transfer(host: str, source_dir: str = None, ship: list = None, caddyfile: str = None, ssh_key_path: str = None):
+    ssh_key_path = os.path.abspath(ssh_key_path or _DEFAULT_SSH_KEY)
+    _wait_for_ssh(host, ssh_key_path)
+    _wait_for_cloud_init(host, ssh_key_path)
+
+    dirs = []
+    if source_dir:
+        dirs.append(source_dir)
+    if ship:
+        dirs += [d for d in ship if d not in dirs]
+
+    if dirs:
+        labels = ", ".join(f"[bold]{os.path.basename(d.rstrip('/'))}[/bold]" for d in dirs)
+        step(f"Shipping {labels}")
+        for d in dirs:
+            _rsync_dir(host, d, ssh_key_path)
+        done(f"Shipped {len(dirs)} director{'y' if len(dirs) == 1 else 'ies'}")
 
     if caddyfile:
         step("Configuring web server")

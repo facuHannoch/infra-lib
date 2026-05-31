@@ -8,54 +8,70 @@ from ._auth import auth_azure, load_azure_credentials
 from ._resolve import resolve_azure_size, AZURE_PRESETS
 from ._spec import VMSpec
 from ._tui import prompt_vm_spec
+from ._config import load_config
 
 
 def cmd_deploy(args):
-    if args.source and not os.path.isdir(args.source):
-        print(f"error: source must be a directory: {args.source}")
+    # Load infra.yml if present; CLI flags override config values
+    cfg = load_config()
+
+    source = args.source
+    name = args.name if args.name != "default" else (cfg.name if cfg else "default")
+    location = args.location if args.location != "CentralUS" else (cfg.location if cfg else "CentralUS")
+    ship = cfg.ship if cfg else []
+
+    if source and not os.path.isdir(source):
+        print(f"error: source must be a directory: {source}")
         sys.exit(1)
 
-    strategy = args.domain_strategy
-    if args.domain and strategy is None:
+    # Domain: CLI flags win, fall back to config
+    raw_domain = args.domain or (cfg.domain if cfg else None)
+    strategy = args.domain_strategy or (cfg.domain_strategy if cfg else None)
+    proxied = args.proxied or (cfg.proxied if cfg else False)
+    if raw_domain and strategy is None:
         strategy = "own"
-    if not args.domain and strategy not in (None, "http"):
+    if not raw_domain and strategy not in (None, "http"):
         print("error: --domain is required when using --domain-strategy own or cloudflare")
         sys.exit(1)
 
     domain = None
     try:
         if strategy == "own":
-            domain = BYODomain(name=args.domain, proxied=args.proxied)
+            domain = BYODomain(name=raw_domain, proxied=proxied)
         elif strategy == "cloudflare":
             if not args.cloudflare_token:
                 print("error: --cloudflare-token is required when using --domain-strategy cloudflare")
                 sys.exit(1)
-            domain = CloudflareDomain(name=args.domain, api_token=args.cloudflare_token, proxied=args.proxied)
+            domain = CloudflareDomain(name=raw_domain, api_token=args.cloudflare_token, proxied=proxied)
     except ValueError as e:
         print(f"error: {e}")
         sys.exit(1)
 
-    if args.vm:
-        preset = AZURE_PRESETS.get(args.vm)
+    # VM spec: --vm flag > config > TUI prompt
+    vm_label = args.vm or (cfg.vm if cfg else None)
+    if vm_label:
+        preset = AZURE_PRESETS.get(vm_label)
         if not preset:
-            print(f"error: unknown VM size '{args.vm}'. Choose from: {', '.join(AZURE_PRESETS)}")
+            print(f"error: unknown VM size '{vm_label}'. Choose from: {', '.join(AZURE_PRESETS)}")
             sys.exit(1)
         vm_spec = VMSpec(cpu=preset["cpu"], ram_gb=preset["ram_gb"])
     else:
         vm_spec = prompt_vm_spec()
 
+    setup = cfg.setup if cfg else []
+    if args.install:
+        setup = setup + [args.install]
+
     result = deploy(
-        source=args.source,
-        name=args.name,
+        source=source,
+        name=name,
         domain=domain,
-        location=args.location,
+        location=location,
         ssh_key_path=args.ssh_key,
-        install=args.install,
+        ship=ship,
+        setup=setup,
         vm=vm_spec,
     )
-    print(f"Deployed successfully.")
-    print(f"  IP:  {result.ip}")
-    print(f"  URL: {result.url}")
 
 
 def cmd_sizes(args):

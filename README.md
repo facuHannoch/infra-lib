@@ -31,6 +31,7 @@ infra-lib deploy --name oneFileProject .
 
 - Generated SSH keys are stored in `~/.infra-lib/keys`.
 - Credentials are written into `~/.infra-lib/credentials`
+- files are stored in `/srv/files`
 
 ```
 infra-lib auth

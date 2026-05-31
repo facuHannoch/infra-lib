@@ -1,0 +1,12 @@
+name: myagent
+vm: small
+
+ship:
+  - .
+  - ../my-lib
+
+setup:
+  - sudo apt install -y unzip
+  - curl -fsSL https://bun.sh/install | bash
+  - source ~/.bashrc && cd /srv/files/myagent && bun install
+  - source ~/.bashrc && cd /srv/files/myagent && bun run start &
