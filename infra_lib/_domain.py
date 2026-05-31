@@ -10,7 +10,9 @@ def _validate_domain(name: str):
         raise ValueError(f"Invalid domain name: {name!r}")
 
 
-def _default_caddyfile() -> str:
+def _default_caddyfile(port: int = None) -> str:
+    if port:
+        return f":80 {{\n    reverse_proxy localhost:{port}\n}}\n"
     return ":80 {\n    root * /srv/files\n    file_server browse\n}\n"
 
 
@@ -18,7 +20,9 @@ class Domain:
     def caddyfile_host(self) -> str:
         raise NotImplementedError
 
-    def caddyfile(self) -> str:
+    def caddyfile(self, port: int = None) -> str:
+        if port:
+            return f"{self.caddyfile_host()} {{\n    reverse_proxy localhost:{port}\n}}\n"
         return f"{self.caddyfile_host()} {{\n    root * /srv/files\n    file_server browse\n}}\n"
 
     def provision_dns(self, ip: str):

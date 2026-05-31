@@ -10,6 +10,8 @@ Usage
 ```
 # It creates a vm, and puts the contents of the current directory into the vm
 infra-lib deploy --name oneFileProject .
+
+infra-lib deploy --name projectWithDomain --domain domain.com
 ```
 
 

@@ -62,7 +62,9 @@ def run_setup(host: str, commands: list[str], ssh_key_path: str = None):
         client = _connect(host, ssh_key_path)
         _, stdout, _ = client.exec_command(command, get_pty=True)
         for line in stdout:
-            console.print(f"    [dim]{line}[/dim]", end="")
+            clean = line.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
+            if clean.strip():
+                console.print(f"    [dim]{clean}[/dim]")
         exit_code = stdout.channel.recv_exit_status()
         client.close()
         if exit_code != 0:

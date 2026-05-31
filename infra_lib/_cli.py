@@ -62,6 +62,8 @@ def cmd_deploy(args):
     if args.install:
         setup = setup + [args.install]
 
+    port = args.port or (cfg.port if cfg else None)
+
     result = deploy(
         source=source,
         name=name,
@@ -71,6 +73,7 @@ def cmd_deploy(args):
         ship=ship,
         setup=setup,
         vm=vm_spec,
+        port=port,
     )
 
 
@@ -153,6 +156,7 @@ def main():
     p_deploy.add_argument("--proxied", action="store_true")
     p_deploy.add_argument("--cloudflare-token", default=None)
     p_deploy.add_argument("--install", default=None, help="Shell command to run on the VM after deploy")
+    p_deploy.add_argument("--port", type=int, default=None, help="App port to expose via reverse proxy")
     p_deploy.add_argument("--vm", default=None, choices=list(AZURE_PRESETS), metavar="SIZE",
                           help=f"VM size preset: {', '.join(AZURE_PRESETS)} (skips interactive prompt)")
 
