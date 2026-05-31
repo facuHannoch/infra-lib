@@ -5,8 +5,9 @@ from . import deploy
 from ._domain import BYODomain, CloudflareDomain
 from ._provision import list_deployments, destroy
 from ._auth import auth_azure, load_azure_credentials
-from ._resolve import resolve_azure_size
+from ._resolve import resolve_azure_size, AZURE_PRESETS
 from ._spec import VMSpec
+from ._tui import prompt_vm_spec
 
 
 def cmd_deploy(args):
@@ -34,6 +35,15 @@ def cmd_deploy(args):
         print(f"error: {e}")
         sys.exit(1)
 
+    if args.vm:
+        preset = AZURE_PRESETS.get(args.vm)
+        if not preset:
+            print(f"error: unknown VM size '{args.vm}'. Choose from: {', '.join(AZURE_PRESETS)}")
+            sys.exit(1)
+        vm_spec = VMSpec(cpu=preset["cpu"], ram_gb=preset["ram_gb"])
+    else:
+        vm_spec = prompt_vm_spec()
+
     result = deploy(
         source=args.source,
         name=args.name,
@@ -41,6 +51,7 @@ def cmd_deploy(args):
         location=args.location,
         ssh_key_path=args.ssh_key,
         install=args.install,
+        vm=vm_spec,
     )
     print(f"Deployed successfully.")
     print(f"  IP:  {result.ip}")
@@ -126,6 +137,8 @@ def main():
     p_deploy.add_argument("--proxied", action="store_true")
     p_deploy.add_argument("--cloudflare-token", default=None)
     p_deploy.add_argument("--install", default=None, help="Shell command to run on the VM after deploy")
+    p_deploy.add_argument("--vm", default=None, choices=list(AZURE_PRESETS), metavar="SIZE",
+                          help=f"VM size preset: {', '.join(AZURE_PRESETS)} (skips interactive prompt)")
 
     # sizes
     p_sizes = subparsers.add_parser("sizes", help="List available VM sizes for given specs")
