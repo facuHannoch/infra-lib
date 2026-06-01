@@ -1,4 +1,5 @@
 import argparse
+import logging
 import os
 import sys
 
@@ -235,10 +236,24 @@ def cmd_list(args):
         print(fmt.format(d.name, d.ip or "-", d.url or "-", d.ssh_key or "-"))
 
 
+def _configure_logging(verbosity: int):
+    """Route library diagnostics to stderr when -v is given (never stdout)."""
+    if not verbosity:
+        return
+    level = logging.DEBUG if verbosity >= 2 else logging.INFO
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+    root = logging.getLogger("infra_lib")
+    root.setLevel(level)
+    root.addHandler(handler)
+
+
 def main():
     progress.set_reporter(ConsoleReporter())
 
     parser = argparse.ArgumentParser(prog="infra-lib", description="Deploy a directory to the cloud.")
+    parser.add_argument("-v", "--verbose", action="count", default=0,
+                        help="Diagnostics to stderr (-v info, -vv debug)")
     subparsers = parser.add_subparsers(dest="command")
 
     # deploy
@@ -311,6 +326,7 @@ def main():
     p_list.add_argument("-n", "--names", action="store_true", help="Print names only, one per line")
 
     args = parser.parse_args()
+    _configure_logging(args.verbose)
 
     if args.command == "sizes":
         cmd_sizes(args)

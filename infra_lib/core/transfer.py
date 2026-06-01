@@ -1,9 +1,12 @@
+import logging
 import os
 import subprocess
 import time
 import paramiko
 
 from .. import progress
+
+log = logging.getLogger(__name__)
 
 _DEFAULT_SSH_KEY = os.path.expanduser("~/.infra-lib/keys/default_id_rsa")
 
@@ -45,6 +48,7 @@ def open_ssh(host: str, ssh_key_path: str = None, wait: bool = True) -> paramiko
 
 def ssh_exec(host: str, command: str, ssh_key_path: str = None) -> tuple[str, str, int]:
     """Public: run one command over SSH, return (stdout, stderr, exit_code)."""
+    log.debug("ssh %s: %s", host, command)
     client = open_ssh(host, ssh_key_path)
     try:
         _, stdout, stderr = client.exec_command(command)

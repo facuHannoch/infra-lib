@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import time
 import urllib.request
@@ -7,6 +8,8 @@ import urllib.parse
 from ...models import ExpectedSpecs, VMSpec
 from ... import progress
 from ...progress import warn
+
+log = logging.getLogger(__name__)
 
 _CACHE_DIR = os.path.expanduser("~/.infra-lib/cache")
 _CACHE_TTL = 86400  # 24 hours
@@ -79,7 +82,8 @@ def _azure_list_sizes(location: str) -> dict:
         with open(cache_file, "w") as f:
             json.dump(sizes, f)
         return sizes
-    except Exception:
+    except Exception as e:
+        log.debug("Azure pricing API request failed: %s", e, exc_info=True)
         if os.path.exists(cache_file):
             warn("Azure pricing API unavailable, using cached prices.")
             with open(cache_file) as f:
@@ -124,7 +128,8 @@ def _azure_size_specs(location: str, credential) -> list[dict]:
             if cpu and ram_gb:
                 result.append({"name": sku.name, "cpu": cpu, "ram_gb": ram_gb})
         return result
-    except Exception:
+    except Exception as e:
+        log.debug("Azure SKU API request failed: %s", e, exc_info=True)
         warn("Azure SKU API unavailable, using built-in fallback sizes.")
         return _preset_specs()
 

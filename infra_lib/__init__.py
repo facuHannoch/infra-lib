@@ -21,6 +21,12 @@ Public API (suitable for programmatic / MCP use; silent by default):
     infra_lib.connect("myapp")
     infra_lib.down("myapp")
 """
+import logging as _logging
+
+# Library best practice: silent by default. Apps (the CLI) attach a real handler.
+# Diagnostics go through this logger; user-facing narrative goes through progress.
+_logging.getLogger("infra_lib").addHandler(_logging.NullHandler())
+
 from .models import Infrastructure, Machine, ExpectedSpecs, VMSpec, Disk, Deployment, Service
 from .core.domain import Domain, BYODomain, CloudflareDomain, build_domain
 from .pipeline import deploy, get, list_deployments, run, logs, connect, down

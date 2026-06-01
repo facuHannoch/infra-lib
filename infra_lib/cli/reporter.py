@@ -1,5 +1,8 @@
+import logging
 import sys
 from ..progress import Reporter, console
+
+log = logging.getLogger(__name__)
 
 
 class ConsoleReporter(Reporter):
@@ -35,7 +38,8 @@ class ConsoleReporter(Reporter):
             questionary.press_any_key_to_continue("  Press Enter once DNS is configured...").ask()
         except ImportError:
             input("  Press Enter once DNS is configured...")
-        except EOFError:
+        except EOFError as e:
+            log.debug("DNS pause prompt failed: %s", e, exc_info=True)
             self.warn("Couldn't pause for DNS confirmation; continuing.")
 
     def confirm_test(self) -> bool:
