@@ -91,7 +91,8 @@ def _make_infrastructure(ssh_key_path: str, vm_size: str = "Standard_D2s_v3", st
 
         def make_cloud_init(ip: str) -> str:
             script = """#!/bin/bash
-apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
+apt-get update
+apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
 apt-get update && apt-get install -y caddy
@@ -156,10 +157,10 @@ def destroy(name: str, purge: bool = True):
         opts=auto.LocalWorkspaceOptions(env_vars={"PULUMI_CONFIG_PASSPHRASE": ""}),
     )
     try:
-        stack.destroy(on_output=print)
+        stack.destroy(on_output=progress.raw)
     except ConcurrentUpdateError:
         stack.cancel()
-        stack.destroy(on_output=print)
+        stack.destroy(on_output=progress.raw)
     if purge:
         stack.workspace.remove_stack(name)
 
@@ -192,22 +193,20 @@ def list_deployments() -> list:
     return result
 
 
-def provision(name: str = "default", location: str = "CentralUS", ssh_key_path: str = None, vm_spec=None) -> dict:
+def provision(name: str = "default", location: str = "CentralUS", ssh_key_path: str = None,
+              vm_spec=None, storage_gb: int = 30) -> dict:
     from .auth import load_azure_credentials
-    from .sizes import resolve_azure_size
-    from ...models import VMSpec
     load_azure_credentials()
 
-    spec = vm_spec or VMSpec()
-    with progress.status(f"Checking availability in {location}..."):
-        resolved = resolve_azure_size(spec, location)
-    progress.raw(f"  VM: {resolved}")
+    if vm_spec is None or not vm_spec.type:
+        raise ValueError("provision() requires a resolved VMSpec (call resolve() first).")
+    progress.raw(f"  VM: {vm_spec}")
 
     ssh_key_path = os.path.abspath(ssh_key_path or _DEFAULT_SSH_KEY)
     stack = auto.create_or_select_stack(
         stack_name=name,
         project_name="infra-lib",
-        program=_make_infrastructure(ssh_key_path, resolved.name, spec.storage_gb),
+        program=_make_infrastructure(ssh_key_path, vm_spec.type, storage_gb),
         opts=auto.LocalWorkspaceOptions(env_vars={"PULUMI_CONFIG_PASSPHRASE": ""}),
     )
     stack.set_config("azure-native:location", auto.ConfigValue(location))

@@ -8,8 +8,8 @@ from .. import progress
 def check_port(host: str, port: int, ssh_key_path: str) -> bool:
     """Returns True if the given port is listening on the VM."""
     try:
-        from .transfer import _connect
-        client = _connect(host, ssh_key_path)
+        from .transfer import open_ssh
+        client = open_ssh(host, ssh_key_path, wait=False)
         _, stdout, _ = client.exec_command(f"ss -tlnp | grep ':{port} '")
         output = stdout.read().decode().strip()
         client.close()

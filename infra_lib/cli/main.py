@@ -4,9 +4,10 @@ import sys
 
 from .. import progress
 from ..pipeline import deploy, list_deployments, destroy
-from ..core.domain import BYODomain, CloudflareDomain
+from ..models import Infrastructure, ExpectedSpecs, VMSpec
+from ..core.domain import build_domain
 from ..providers.azure.auth import auth_azure, load_azure_credentials
-from ..providers.azure.sizes import AZURE_PRESETS
+from ..providers.azure.sizes import AZURE_PRESETS, expectedspecs_from_preset
 from ..config import load_config
 from .tui import prompt_vm_spec
 from .reporter import ConsoleReporter
@@ -35,77 +36,86 @@ def _open_editor_config(name: str) -> str:
     return content
 
 
-def cmd_deploy(args):
-    # Resolve config: --config with path, --config alone (editor), or auto infra.yml
-    if args.config is None:
-        cfg = load_config()
-    elif args.config == "":
-        import tempfile
-        name_hint = args.name if args.name != "default" else "myapp"
-        content = _open_editor_config(name_hint)
-        with tempfile.NamedTemporaryFile(suffix=".yml", mode="w", delete=False) as f:
-            f.write(content)
-            tmp = f.name
-        cfg = load_config(tmp)
-        os.unlink(tmp)
-    else:
+def _resolve_config(args):
+    """Return the base Infrastructure from config (or None), exiting on error."""
+    try:
+        if args.no_config:
+            return None
+        if args.config is None:
+            return load_config()
+        if args.config == "":
+            import tempfile
+            name_hint = args.name if args.name != "default" else "myapp"
+            content = _open_editor_config(name_hint)
+            with tempfile.NamedTemporaryFile(suffix=".yml", mode="w", delete=False) as f:
+                f.write(content)
+                tmp = f.name
+            try:
+                return load_config(tmp)
+            finally:
+                os.unlink(tmp)
         cfg = load_config(args.config)
         if cfg is None:
             print(f"error: config file not found: {args.config}")
             sys.exit(1)
-
-    source = args.source
-    name = args.name if args.name != "default" else (cfg.name if cfg else "default")
-    location = args.location if args.location != "CentralUS" else (cfg.location if cfg else "CentralUS")
-    ship = cfg.ship if cfg else []
-
-    if source and not os.path.isdir(source):
-        print(f"error: source must be a directory: {source}")
-        sys.exit(1)
-
-    # Domain: CLI flags win, fall back to config
-    raw_domain = args.domain or (cfg.domain if cfg else None)
-    strategy = args.domain_strategy or (cfg.domain_strategy if cfg else None)
-    proxied = args.proxied or (cfg.proxied if cfg else False)
-    if raw_domain and strategy is None:
-        strategy = "own"
-    if not raw_domain and strategy not in (None, "http"):
-        print("error: --domain is required when using --domain-strategy own or cloudflare")
-        sys.exit(1)
-
-    domain = None
-    try:
-        if strategy == "own":
-            domain = BYODomain(name=raw_domain, proxied=proxied)
-        elif strategy == "cloudflare":
-            if not args.cloudflare_token:
-                print("error: --cloudflare-token is required when using --domain-strategy cloudflare")
-                sys.exit(1)
-            domain = CloudflareDomain(name=raw_domain, api_token=args.cloudflare_token, proxied=proxied)
+        return cfg
     except ValueError as e:
         print(f"error: {e}")
         sys.exit(1)
 
-    # VM: --vm flag > config > TUI prompt (all yield a preset label)
-    vm = args.vm or (cfg.vm if cfg else None) or prompt_vm_spec()
 
-    setup = list(cfg.setup) if cfg else []
+def cmd_deploy(args):
+    infra = _resolve_config(args)
+    had_config = infra is not None
+    infra = infra or Infrastructure()
+    machine = infra.machines[0]
+
+    if args.name != "default":
+        infra.name = args.name
+    if args.location != "CentralUS":
+        infra.location = args.location
+
+    if args.source:
+        if not os.path.isdir(args.source):
+            print(f"error: source must be a directory: {args.source}")
+            sys.exit(1)
+        machine.ship.append(os.path.abspath(args.source))
+
+    # Sizing: --instance-type (exact) > --cpu/--ram (raw) > --vm (preset) > config > prompt.
+    if args.instance_type:
+        machine.hardware = VMSpec(type=args.instance_type)
+    elif args.cpu or args.ram:
+        machine.hardware = ExpectedSpecs(cpu=args.cpu or 2, ram_gb=args.ram or 8)
+    elif args.vm:
+        machine.hardware = expectedspecs_from_preset(args.vm)
+    elif not had_config:
+        hardware, prompted_storage = prompt_vm_spec(infra.location)
+        machine.hardware = hardware
+        machine.disk.size_gb = prompted_storage
+    if args.storage:
+        machine.disk.size_gb = args.storage
+
     if args.install:
-        setup.append(args.install)
+        machine.setup.append(args.install)
+    if args.start:
+        machine.start = args.start
+    if args.port:
+        machine.ports = [args.port]
 
-    port = args.port or (cfg.port if cfg else None)
+    # Domain: CLI flags rebuild it; otherwise keep whatever config produced.
+    if args.domain or args.domain_strategy:
+        try:
+            machine.domain = build_domain(
+                name=args.domain,
+                strategy=args.domain_strategy,
+                proxied=args.proxied,
+                cloudflare_token=args.cloudflare_token,
+            )
+        except ValueError as e:
+            print(f"error: {e}")
+            sys.exit(1)
 
-    deploy(
-        source=source,
-        name=name,
-        domain=domain,
-        location=location,
-        ssh_key_path=args.ssh_key,
-        ship=ship,
-        setup=setup,
-        vm=vm,
-        port=port,
-    )
+    deploy(infra, ssh_key_path=args.ssh_key)
 
 
 def _make_credential():
@@ -138,14 +148,29 @@ def cmd_sizes(args):
 
 
 def cmd_auth(args):
-    if args.provider == "azure":
-        try:
-            auth_azure()
-        except Exception as e:
-            print(f"error: {e}")
-            sys.exit(1)
-    else:
+    if args.provider != "azure":
         print(f"error: unsupported provider '{args.provider}'")
+        sys.exit(1)
+
+    # If any service-principal flag is given, save those creds (non-interactive).
+    # The secret may also come from the ARM_CLIENT_SECRET env var to keep it out
+    # of shell history. Otherwise fall back to the interactive device-code flow.
+    secret = args.client_secret or os.environ.get("ARM_CLIENT_SECRET")
+    sp_provided = any([args.client_id, secret, args.tenant_id, args.subscription_id])
+    try:
+        if sp_provided:
+            from ..providers.azure.auth import save_azure_credentials
+            path = save_azure_credentials(
+                client_id=args.client_id,
+                client_secret=secret,
+                tenant_id=args.tenant_id,
+                subscription_id=args.subscription_id,
+            )
+            print(f"Credentials saved to {path}")
+        else:
+            auth_azure()
+    except Exception as e:
+        print(f"error: {e}")
         sys.exit(1)
 
 
@@ -157,6 +182,40 @@ def cmd_down(args):
         except Exception as e:
             print(f"error: {e}")
             sys.exit(1)
+
+
+def cmd_connect(args):
+    from ..pipeline import get
+    d = get(args.name)
+    if not d or not d.ip:
+        print(f"error: deployment '{args.name}' not found")
+        sys.exit(1)
+    ssh_args = ["ssh", "-i", d.ssh_key, "-o", "StrictHostKeyChecking=no", f"{d.user}@{d.ip}"]
+    if args.exec:
+        ssh_args.append(args.exec)
+    os.execvp("ssh", ssh_args)
+
+
+def cmd_logs(args):
+    from ..pipeline import get, logs
+    d = get(args.name)
+    if not d or not d.ip:
+        print(f"error: deployment '{args.name}' not found")
+        sys.exit(1)
+    if args.follow:
+        from ..core.transfer import open_ssh
+        client = open_ssh(d.ip, d.ssh_key)
+        cmd = f"sudo journalctl -u {args.name} -n {args.lines} -f --no-pager"
+        _, stdout, _ = client.exec_command(cmd)
+        try:
+            for line in iter(stdout.readline, ""):
+                print(line.rstrip("\n"))
+        except KeyboardInterrupt:
+            pass
+        finally:
+            client.close()
+    else:
+        print(logs(args.name, lines=args.lines))
 
 
 def cmd_list(args):
@@ -194,11 +253,20 @@ def main():
     p_deploy.add_argument("--proxied", action="store_true")
     p_deploy.add_argument("--cloudflare-token", default=None)
     p_deploy.add_argument("--install", default=None, help="Shell command to run on the VM after deploy")
+    p_deploy.add_argument("--start", default=None, help="Command to run as a supervised systemd service")
     p_deploy.add_argument("--port", type=int, default=None, help="App port to expose via reverse proxy")
     p_deploy.add_argument("--vm", default=None, choices=list(AZURE_PRESETS), metavar="SIZE",
                           help=f"VM size preset: {', '.join(AZURE_PRESETS)} (skips interactive prompt)")
+    p_deploy.add_argument("--instance-type", default=None, metavar="SKU",
+                          help="Exact instance type, e.g. Standard_D2s_v3 (skips size resolution)")
+    p_deploy.add_argument("--cpu", type=int, default=None, help="Minimum vCPUs (resolved to a size)")
+    p_deploy.add_argument("--ram", type=float, default=None, help="Minimum RAM in GB (resolved to a size)")
+    p_deploy.add_argument("--storage", type=int, default=None, metavar="GB",
+                          help="Disk size in GB (default 30)")
     p_deploy.add_argument("--config", nargs="?", const="", default=None, metavar="FILE",
                           help="Config file to use. Omit path to open an editor.")
+    p_deploy.add_argument("--no-config", action="store_true",
+                          help="Ignore any infra.yml in the current directory")
 
     # sizes
     p_sizes = subparsers.add_parser("sizes", help="List available VM sizes for given specs")
@@ -208,13 +276,35 @@ def main():
     p_sizes.add_argument("--ram", type=float, default=1)
 
     # auth
-    p_auth = subparsers.add_parser("auth", help="Authenticate with a cloud provider")
+    p_auth = subparsers.add_parser(
+        "auth",
+        help="Authenticate with a cloud provider",
+        description="Interactive device-code flow by default; pass service-principal "
+                    "flags for non-interactive auth with an existing SP.",
+    )
     p_auth.add_argument("provider", choices=["azure"], help="Cloud provider to authenticate with")
+    p_auth.add_argument("--client-id", default=None, help="Existing service principal app/client ID")
+    p_auth.add_argument("--client-secret", default=None,
+                        help="SP client secret (or set ARM_CLIENT_SECRET)")
+    p_auth.add_argument("--tenant-id", default=None, help="Azure tenant ID")
+    p_auth.add_argument("--subscription-id", default=None, help="Azure subscription ID")
 
     # down
     p_down = subparsers.add_parser("down", help="Destroy a deployment")
     p_down.add_argument("names", nargs="+", metavar="NAME", help="Deployment name(s) to destroy")
     p_down.add_argument("--keep-history", action="store_true", help="Keep Pulumi stack history and config")
+
+    # connect
+    p_connect = subparsers.add_parser("connect", help="SSH into a deployment")
+    p_connect.add_argument("name", help="Deployment name")
+    p_connect.add_argument("-e", "--exec", default=None, metavar="CMD",
+                           help="Run a command instead of opening an interactive shell")
+
+    # logs
+    p_logs = subparsers.add_parser("logs", help="Show service logs for a deployment")
+    p_logs.add_argument("name", help="Deployment name")
+    p_logs.add_argument("-n", "--lines", type=int, default=50, help="Number of lines to show (default 50)")
+    p_logs.add_argument("-f", "--follow", action="store_true", help="Stream new log lines as they arrive")
 
     # list
     p_list = subparsers.add_parser("list", help="List all deployments")
@@ -230,6 +320,10 @@ def main():
         cmd_deploy(args)
     elif args.command == "down":
         cmd_down(args)
+    elif args.command == "connect":
+        cmd_connect(args)
+    elif args.command == "logs":
+        cmd_logs(args)
     elif args.command == "list":
         cmd_list(args)
     else:

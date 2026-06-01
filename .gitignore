@@ -4,3 +4,7 @@
 __pycache__/
 local/
 *.egg-info/
+
+.agents/.secrets/
+.agents/.workspaces/
+.agents/.artifacts/

@@ -4,11 +4,15 @@ import time
 import urllib.request
 import urllib.parse
 
-from ...models import VMSpec, ResolvedSize
+from ...models import ExpectedSpecs, VMSpec
+from ... import progress
 from ...progress import warn
 
 _CACHE_DIR = os.path.expanduser("~/.infra-lib/cache")
 _CACHE_TTL = 86400  # 24 hours
+
+# Human term for an exact instance identifier on this provider (TUI label, etc).
+SIZE_TERM = "SKU"
 
 # Known-good Azure sizes used as fallback when pricing API is unavailable.
 # Prices are approximate on-demand rates in USD/hr (CentralUS, as of 2024).
@@ -20,6 +24,14 @@ AZURE_PRESETS = {
 }
 
 _FALLBACK_PRICES = {v["sku"]: v["price"] for v in AZURE_PRESETS.values()}
+
+
+def expectedspecs_from_preset(label: str) -> ExpectedSpecs:
+    """Turn a preset label ('small') into the cpu/ram minimums it implies."""
+    preset = AZURE_PRESETS.get(label)
+    if not preset:
+        raise ValueError(f"Unknown vm preset '{label}'. Choose from: {', '.join(AZURE_PRESETS)}")
+    return ExpectedSpecs(cpu=preset["cpu"], ram_gb=preset["ram_gb"])
 
 
 def _cache_path(location: str) -> str:
@@ -76,59 +88,93 @@ def _azure_list_sizes(location: str) -> dict:
         return _FALLBACK_PRICES
 
 
+def _preset_specs() -> list[dict]:
+    """Built-in size specs used when the Azure SKU API is unavailable."""
+    return [
+        {"name": p["sku"], "cpu": p["cpu"], "ram_gb": float(p["ram_gb"])}
+        for p in AZURE_PRESETS.values()
+    ]
+
+
 def _azure_size_specs(location: str, credential) -> list[dict]:
-    """Fetch VM size specs (CPU, RAM, architecture) from Azure resource SKUs API."""
+    """Fetch VM size specs (CPU, RAM, architecture) from Azure resource SKUs API.
+
+    Falls back to the built-in preset specs if the API is unavailable, so a
+    SKU-API outage degrades gracefully instead of killing provisioning (mirrors
+    the pricing fallback in _azure_list_sizes).
+    """
     from azure.mgmt.compute import ComputeManagementClient
 
     subscription_id = os.environ.get("ARM_SUBSCRIPTION_ID", "")
     client = ComputeManagementClient(credential, subscription_id)
 
-    result = []
-    for sku in client.resource_skus.list(filter=f"location eq '{location}'"):
-        if sku.resource_type != "virtualMachines":
-            continue
-        # sku.restrictions is non-empty whenever Azure has capacity or zone restrictions on that size.
-        if sku.restrictions:
-            continue
-        caps = {c.name: c.value for c in (sku.capabilities or [])}
-        if caps.get("CpuArchitectureType", "x64") != "x64":
-            continue
-        cpu = int(caps.get("vCPUs", 0))
-        ram_gb = float(caps.get("MemoryGB", 0))
-        if cpu and ram_gb:
-            result.append({"name": sku.name, "cpu": cpu, "ram_gb": ram_gb})
-    return result
+    try:
+        result = []
+        for sku in client.resource_skus.list(filter=f"location eq '{location}'"):
+            if sku.resource_type != "virtualMachines":
+                continue
+            # sku.restrictions is non-empty whenever Azure has capacity or zone restrictions on that size.
+            if sku.restrictions:
+                continue
+            caps = {c.name: c.value for c in (sku.capabilities or [])}
+            if caps.get("CpuArchitectureType", "x64") != "x64":
+                continue
+            cpu = int(caps.get("vCPUs", 0))
+            ram_gb = float(caps.get("MemoryGB", 0))
+            if cpu and ram_gb:
+                result.append({"name": sku.name, "cpu": cpu, "ram_gb": ram_gb})
+        return result
+    except Exception:
+        warn("Azure SKU API unavailable, using built-in fallback sizes.")
+        return _preset_specs()
 
 
-def resolve_azure_size(spec: VMSpec, location: str) -> ResolvedSize:
+def resolve(request, location: str) -> VMSpec:
+    """Turn a sizing request into a concrete, available VMSpec.
+
+    `request` is either an ExpectedSpecs (cpu/ram minimums -> cheapest satisfying
+    SKU) or a VMSpec naming an exact `type` (validated + filled in). Raises
+    RuntimeError if nothing satisfies it or the named type isn't available here.
+    Idempotent: a fully-resolved VMSpec is returned unchanged.
+    """
+    from .auth import load_azure_credentials
     from azure.identity import ClientSecretCredential
 
+    # Already concrete (e.g. resolved earlier in the TUI) — trust it.
+    if isinstance(request, VMSpec) and request.cpu and request.ram_gb:
+        return request
+
+    load_azure_credentials()
     credential = ClientSecretCredential(
         tenant_id=os.environ["ARM_TENANT_ID"],
         client_id=os.environ["ARM_CLIENT_ID"],
         client_secret=os.environ["ARM_CLIENT_SECRET"],
     )
 
-    specs = _azure_size_specs(location, credential)
-    prices = _azure_list_sizes(location)
+    with progress.status(f"Checking availability in {location}..."):
+        specs = _azure_size_specs(location, credential)
+        prices = _azure_list_sizes(location)
 
-    candidates = [
-        s for s in specs
-        if s["cpu"] >= spec.cpu
-        and s["ram_gb"] >= spec.ram_gb
-        and s["name"] in prices
-    ]
+        if isinstance(request, VMSpec):
+            # Exact type requested: validate it exists/is available, fill specs+price.
+            match = next((s for s in specs if s["name"] == request.type), None)
+            if match is None or request.type not in prices:
+                raise RuntimeError(f"{request.type} isn't available in {location}.")
+            best = match
+        else:
+            candidates = [
+                s for s in specs
+                if s["cpu"] >= request.cpu and s["ram_gb"] >= request.ram_gb and s["name"] in prices
+            ]
+            if not candidates:
+                raise RuntimeError(
+                    f"No size in {location} matches {request.cpu} vCPU / {request.ram_gb}GB RAM."
+                )
+            candidates.sort(key=lambda s: (prices.get(s["name"], 9999), s["cpu"], s["ram_gb"]))
+            best = candidates[0]
 
-    if not candidates:
-        raise RuntimeError(
-            f"No VM size found in {location} with >= {spec.cpu} vCPU and >= {spec.ram_gb}GB RAM."
-        )
-
-    candidates.sort(key=lambda s: (prices.get(s["name"], 9999), s["cpu"], s["ram_gb"]))
-    best = candidates[0]
-
-    return ResolvedSize(
-        name=best["name"],
+    return VMSpec(
+        type=best["name"],
         cpu=best["cpu"],
         ram_gb=best["ram_gb"],
         price_per_hour=prices.get(best["name"]),

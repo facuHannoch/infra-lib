@@ -10,6 +10,29 @@ def _validate_domain(name: str):
         raise ValueError(f"Invalid domain name: {name!r}")
 
 
+def build_domain(name: str = None, strategy: str = None, proxied: bool = False,
+                 cloudflare_token: str = None) -> Optional["Domain"]:
+    """Construct the right Domain from raw inputs (config or CLI flags).
+
+    strategy None/"http" -> no managed domain (plain http://<ip>).
+    A bare domain with no strategy defaults to "own".
+    """
+    strategy = strategy or ("own" if name else None)
+    if strategy in (None, "http"):
+        return None
+    if not name:
+        raise ValueError(f"a domain name is required for strategy '{strategy}'")
+    if strategy == "own":
+        return BYODomain(name=name, proxied=proxied)
+    if strategy == "cloudflare":
+        if not cloudflare_token:
+            raise ValueError(
+                "cloudflare strategy needs an API token (--cloudflare-token or CLOUDFLARE_API_TOKEN)"
+            )
+        return CloudflareDomain(name=name, api_token=cloudflare_token, proxied=proxied)
+    raise ValueError(f"unknown domain strategy: {strategy!r}")
+
+
 def default_caddyfile(port: int = None) -> str:
     if port:
         return f":80 {{\n    reverse_proxy localhost:{port}\n}}\n"

@@ -1,5 +1,12 @@
 name: {name}
-vm: small          # micro, small, medium, large
+
+# VM size — pick ONE way:
+vm: small               # preset: micro, small, medium, large
+# cpu: 4                # ...or minimum specs (resolved to the cheapest matching size)
+# ram: 16
+# instance_type: Standard_D2s_v3   # ...or an exact provider size (skips resolution)
+
+# storage: 30      # disk size in GB (default 30)
 # port: 3000       # expose app port via reverse proxy
 # location: CentralUS
 
@@ -7,9 +14,13 @@ vm: small          # micro, small, medium, large
 #   - .            # directories to rsync to the VM
 #   - ../my-lib
 
-# setup:           # shell commands to run after ship
+# setup:           # run once, must exit (install / build)
 #   - sudo apt install -y unzip
 #   - curl -fsSL https://bun.sh/install | bash
+#   - cd /srv/files/my-lib && ~/.bun/bin/bun install
+
+# start:           # long-running server, supervised by systemd (restarts on crash, survives reboot)
+#   cd /srv/files/myapp && ~/.bun/bin/agents start-hub
 
 # domain: myapp.example.com
 # domain_strategy: own   # own or cloudflare
