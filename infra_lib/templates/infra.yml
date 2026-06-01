@@ -1,4 +1,9 @@
 name: {name}
+# provider: azure        # cloud to deploy to (default: azure)
+# location: CentralUS
+
+# --- One machine (flat form — the common case) ------------------------------
+# Everything below configures a single VM.
 
 # VM size — pick ONE way:
 vm: small               # preset: micro, small, medium, large
@@ -7,8 +12,7 @@ vm: small               # preset: micro, small, medium, large
 # instance_type: Standard_D2s_v3   # ...or an exact provider size (skips resolution)
 
 # storage: 30      # disk size in GB (default 30)
-# port: 3000       # expose app port via reverse proxy
-# location: CentralUS
+# port: 3000       # expose app port via reverse proxy (alias for `ports: [3000]`)
 
 # ship:
 #   - .            # directories to rsync to the VM
@@ -24,3 +28,18 @@ vm: small               # preset: micro, small, medium, large
 
 # domain: myapp.example.com
 # domain_strategy: own   # own or cloudflare
+
+# --- Several machines (nested form) -----------------------------------------
+# Instead of the flat fields above, list machines by name. Each takes the same
+# per-machine keys (vm/cpu/ram, storage, ports, ship, setup, start, domain).
+#
+# machines:
+#   web:
+#     vm: small
+#     ports: [3000]
+#     ship: [.]
+#     domain: myapp.example.com
+#   worker:
+#     cpu: 4
+#     ram: 16
+#     start: ~/.bun/bin/bun run worker

@@ -10,7 +10,8 @@ It is usable three ways from the same core:
 - a **Python API** (`import infra_lib`) for scripts, and
 - (planned) an **MCP server** so agents can deploy/manage infrastructure.
 
-Today it targets **Azure**; the codebase is layered so other providers can slot in.
+Today it ships an **Azure** provider; clouds sit behind a `Provider` interface, so
+others can slot in without touching the pipeline.
 
 ---
 
@@ -162,11 +163,17 @@ current directory. CLI flags override values in the file. Use `--no-config` to i
 
 `infra-lib deploy --config` (no path) opens an editor with a template to fill in.
 
+The file comes in two shapes: a **flat** form for the common single-machine case, and a
+**nested** `machines:` form for several machines (see below). CLI flags override file values.
+
+### Flat form (one machine)
+
 A fully-annotated example:
 
 ```yaml
 name: myapp                 # deployment name (also the systemd service + stack name)
 location: CentralUS         # Azure region
+provider: azure             # cloud to deploy to (default: azure)
 
 # --- VM size: pick ONE way ---
 vm: small                   # preset: micro, small, medium, large
@@ -198,6 +205,31 @@ proxied: false              # true if a proxy (e.g. Cloudflare) terminates TLS f
 > `start` must be a **single command string** — a service has one entry point. For
 > multiple processes, that's multiple services (not yet supported; see the roadmap).
 
+### Nested form (several machines)
+
+`name`/`location`/`provider` stay at the top level; everything else moves under
+`machines:`, a mapping of machine name → config. Each machine takes the same per-machine
+keys as the flat form (`vm`/`cpu`/`ram`/`instance_type`, `storage`, `ports`, `ship`,
+`setup`, `start`, `domain`). `port:` is accepted as an alias for `ports: [N]`.
+
+```yaml
+name: myapp
+provider: azure
+machines:
+  web:
+    vm: small
+    ports: [3000]
+    ship: [.]
+    domain: myapp.example.com
+  worker:
+    cpu: 4
+    ram: 16
+    start: ~/.bun/bin/bun run worker
+```
+
+> Parsing both forms is supported today, but `deploy` still provisions a **single**
+> machine and refuses more than one (see the roadmap). The nested form is forward-looking.
+
 ---
 
 ## CLI reference
@@ -211,6 +243,7 @@ Provision and deploy. `SOURCE` is an optional directory to ship (added to `ship`
 | Option | Description |
 |---|---|
 | `--name NAME` | Deployment name (default `default`). Also the systemd service & stack name. |
+| `--provider P` | Cloud provider (default `azure`; currently the only choice). |
 | `--location LOC` | Azure region (default `CentralUS`). |
 | `--vm SIZE` | Preset: `micro`, `small`, `medium`, `large`. |
 | `--instance-type SKU` | Exact size, e.g. `Standard_D2s_v3` (skips resolution). |
@@ -373,9 +406,10 @@ infra_lib.down("myapp")                    # destroy + purge
 
 ### Models
 
-- **`Infrastructure`** — the thing you deploy: `name`, `location`, `machines: [Machine]`.
-- **`Machine`** — one VM: `hardware` (`ExpectedSpecs` | `VMSpec`), `disk` (`Disk`),
-  `ship`, `setup`, `start`, `ports`, `domain`.
+- **`Infrastructure`** — the thing you deploy: `name`, `location`, `provider`,
+  `machines: [Machine]`.
+- **`Machine`** — one VM: optional `name`, `hardware` (`ExpectedSpecs` | `VMSpec`),
+  `disk` (`Disk`), `ship`, `setup`, `start`, `ports`, `domain`.
 - **`ExpectedSpecs(cpu, ram_gb)`** — a size *request* (resolved to a `VMSpec`).
 - **`VMSpec(type, cpu, ram_gb, price_per_hour)`** — a concrete, resolved size.
 - **`Disk(size_gb, type)`** — storage.
@@ -412,12 +446,16 @@ cli/ ──►  pipeline  ──►  core/ + providers/  ──►  progress
 
 - **`core/`** and **`providers/`** never import `cli/`.
 - **`progress`** is the only cross-cutting dependency and imports nobody.
+- **Clouds sit behind a `Provider`.** `pipeline`/`cli` reach a cloud only through
+  `providers.get_provider(name)` — never by importing a cloud module. The provider owns
+  its cloud-specific vocabulary (`admin_user`, `size_term`, `presets`); `core/` takes the
+  SSH `user` as a parameter so it stays provider-agnostic.
 
 ```
 infra_lib/
 ├── __init__.py          public API
 ├── models.py            Infrastructure, Machine, ExpectedSpecs, VMSpec, Disk, Deployment, Service
-├── config.py            infra.yml → Infrastructure
+├── config.py            infra.yml (flat or nested) → Infrastructure
 ├── progress.py          Reporter (silent by default) + module-level shims
 ├── pipeline.py          deploy / get / list_deployments / run / logs / connect / down
 ├── core/
@@ -426,7 +464,10 @@ infra_lib/
 │   ├── health.py        wait_for_port / wait_for_url
 │   └── transfer.py      SSH/SFTP/rsync, run_setup, start_service, ssh_exec, open_ssh
 ├── providers/
+│   ├── __init__.py      provider registry: get_provider(name) / provider_names()
+│   ├── base.py          the Provider interface
 │   └── azure/
+│       ├── provider.py  AzureProvider (the Provider impl; facade over the modules below)
 │       ├── auth.py      device-code & service-principal auth
 │       ├── provision.py Pulumi program + provision / destroy / list
 │       └── sizes.py     presets, pricing, resolve()
@@ -438,6 +479,9 @@ infra_lib/
 
 The same `pipeline.deploy()` powers both the CLI and the API; only the CLI installs an
 interactive **Reporter**. That's what keeps the API silent and reusable.
+
+To add a cloud: implement `Provider` (`providers/base.py`) in a new `providers/<name>/`
+and register it in `providers/__init__.py`.
 
 ---
 
@@ -532,10 +576,12 @@ infra-lib logs hub -f       # watch the service
 
 Current limitations:
 
-- **Single machine per deployment.** The model supports `machines: [...]`, but `deploy`
-  currently provisions `machines[0]` and refuses more (fails loud).
+- **Single machine per deployment.** The model and `infra.yml` (flat *and* nested) support
+  several machines, but `deploy` currently provisions `machines[0]` and refuses more
+  (fails loud).
 - **One port / one service** is wired through end-to-end.
-- **Azure only.** The layering is ready for other providers; selection is not yet abstracted.
+- **Azure only.** The `Provider` interface and registry exist (selection *is* abstracted);
+  Azure is the only implementation. Other clouds are unimplemented, not unsupported.
 
 Planned (see [`todo.md`](./todo.md) for details):
 

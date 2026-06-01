@@ -5,11 +5,11 @@ import ssl
 from .. import progress
 
 
-def check_port(host: str, port: int, ssh_key_path: str) -> bool:
+def check_port(host: str, port: int, ssh_key_path: str, user: str = "azureuser") -> bool:
     """Returns True if the given port is listening on the VM."""
     try:
         from .transfer import open_ssh
-        client = open_ssh(host, ssh_key_path, wait=False)
+        client = open_ssh(host, ssh_key_path, wait=False, user=user)
         _, stdout, _ = client.exec_command(f"ss -tlnp | grep ':{port} '")
         output = stdout.read().decode().strip()
         client.close()
@@ -18,12 +18,13 @@ def check_port(host: str, port: int, ssh_key_path: str) -> bool:
         return False
 
 
-def wait_for_port(host: str, port: int, ssh_key_path: str, timeout: int = 60) -> bool:
+def wait_for_port(host: str, port: int, ssh_key_path: str, timeout: int = 60,
+                  user: str = "azureuser") -> bool:
     """Polls until the port is listening on the VM. Returns True if it comes up."""
     deadline = time.time() + timeout
     with progress.status(f"Waiting for app to start on port {port}..."):
         while time.time() < deadline:
-            if check_port(host, port, ssh_key_path):
+            if check_port(host, port, ssh_key_path, user=user):
                 progress.done(f"App is listening on port {port}")
                 return True
             time.sleep(3)

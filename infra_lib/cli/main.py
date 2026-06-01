@@ -7,11 +7,13 @@ from .. import progress
 from ..pipeline import deploy, list_deployments, destroy
 from ..models import Infrastructure, ExpectedSpecs, VMSpec
 from ..core.domain import build_domain
-from ..providers.azure.auth import auth_azure, load_azure_credentials
-from ..providers.azure.sizes import AZURE_PRESETS, expectedspecs_from_preset
+from ..providers import get_provider, provider_names
 from ..config import load_config
 from .tui import prompt_vm_spec
 from .reporter import ConsoleReporter
+
+# Presets of the default provider, used for --vm help/choices at parse time.
+_DEFAULT_PRESETS = list(get_provider().presets)
 
 
 def _template_path() -> str:
@@ -75,6 +77,9 @@ def cmd_deploy(args):
         infra.name = args.name
     if args.location != "CentralUS":
         infra.location = args.location
+    if args.provider != "azure":
+        infra.provider = args.provider
+    provider = get_provider(infra.provider)
 
     if args.source:
         if not os.path.isdir(args.source):
@@ -88,9 +93,9 @@ def cmd_deploy(args):
     elif args.cpu or args.ram:
         machine.hardware = ExpectedSpecs(cpu=args.cpu or 2, ram_gb=args.ram or 8)
     elif args.vm:
-        machine.hardware = expectedspecs_from_preset(args.vm)
+        machine.hardware = provider.preset_specs(args.vm)
     elif not had_config:
-        hardware, prompted_storage = prompt_vm_spec(infra.location)
+        hardware, prompted_storage = prompt_vm_spec(infra.location, provider)
         machine.hardware = hardware
         machine.disk.size_gb = prompted_storage
     if args.storage:
@@ -119,39 +124,22 @@ def cmd_deploy(args):
     deploy(infra, ssh_key_path=args.ssh_key)
 
 
-def _make_credential():
-    from azure.identity import ClientSecretCredential
-    return ClientSecretCredential(
-        tenant_id=os.environ["ARM_TENANT_ID"],
-        client_id=os.environ["ARM_CLIENT_ID"],
-        client_secret=os.environ["ARM_CLIENT_SECRET"],
-    )
-
-
 def cmd_sizes(args):
     try:
-        load_azure_credentials()
-        from ..providers.azure.sizes import _azure_size_specs, _azure_list_sizes
-        specs = _azure_size_specs(args.location, _make_credential())
-        prices = _azure_list_sizes(args.location)
-        candidates = [
-            s for s in specs
-            if s["cpu"] >= args.cpu and s["ram_gb"] >= args.ram and s["name"] in prices
-        ]
-        candidates.sort(key=lambda s: prices.get(s["name"], 9999))
+        sizes = get_provider(args.provider).list_sizes(
+            args.location, min_cpu=args.cpu, min_ram_gb=args.ram
+        )
         print(f"{'NAME':<30} {'CPU':>4} {'RAM GB':>8} {'$/HR':>8}")
         print("-" * 55)
-        for s in candidates[:20]:
-            print(f"{s['name']:<30} {s['cpu']:>4} {s['ram_gb']:>8.1f} {prices.get(s['name'], 0):>8.4f}")
+        for s in sizes[:20]:
+            print(f"{s['name']:<30} {s['cpu']:>4} {s['ram_gb']:>8.1f} {s['price']:>8.4f}")
     except Exception as e:
         print(f"error: {e}")
         sys.exit(1)
 
 
 def cmd_auth(args):
-    if args.provider != "azure":
-        print(f"error: unsupported provider '{args.provider}'")
-        sys.exit(1)
+    provider = get_provider(args.provider)
 
     # If any service-principal flag is given, save those creds (non-interactive).
     # The secret may also come from the ARM_CLIENT_SECRET env var to keep it out
@@ -160,8 +148,7 @@ def cmd_auth(args):
     sp_provided = any([args.client_id, secret, args.tenant_id, args.subscription_id])
     try:
         if sp_provided:
-            from ..providers.azure.auth import save_azure_credentials
-            path = save_azure_credentials(
+            path = provider.save_credentials(
                 client_id=args.client_id,
                 client_secret=secret,
                 tenant_id=args.tenant_id,
@@ -169,7 +156,7 @@ def cmd_auth(args):
             )
             print(f"Credentials saved to {path}")
         else:
-            auth_azure()
+            provider.authenticate()
     except Exception as e:
         print(f"error: {e}")
         sys.exit(1)
@@ -260,7 +247,7 @@ def main():
     p_deploy = subparsers.add_parser("deploy", help="Deploy a directory")
     p_deploy.add_argument("source", nargs="?", default=None, help="Path to the directory to deploy (optional)")
     p_deploy.add_argument("--name", default="default", help="Deployment name (default: default)")
-    p_deploy.add_argument("--provider", default="azure", choices=["azure"])
+    p_deploy.add_argument("--provider", default="azure", choices=provider_names())
     p_deploy.add_argument("--location", default="CentralUS")
     p_deploy.add_argument("--ssh-key", default=None)
     p_deploy.add_argument("--domain", default=None)
@@ -270,8 +257,8 @@ def main():
     p_deploy.add_argument("--install", default=None, help="Shell command to run on the VM after deploy")
     p_deploy.add_argument("--start", default=None, help="Command to run as a supervised systemd service")
     p_deploy.add_argument("--port", type=int, default=None, help="App port to expose via reverse proxy")
-    p_deploy.add_argument("--vm", default=None, choices=list(AZURE_PRESETS), metavar="SIZE",
-                          help=f"VM size preset: {', '.join(AZURE_PRESETS)} (skips interactive prompt)")
+    p_deploy.add_argument("--vm", default=None, choices=_DEFAULT_PRESETS, metavar="SIZE",
+                          help=f"VM size preset: {', '.join(_DEFAULT_PRESETS)} (skips interactive prompt)")
     p_deploy.add_argument("--instance-type", default=None, metavar="SKU",
                           help="Exact instance type, e.g. Standard_D2s_v3 (skips size resolution)")
     p_deploy.add_argument("--cpu", type=int, default=None, help="Minimum vCPUs (resolved to a size)")
@@ -285,7 +272,7 @@ def main():
 
     # sizes
     p_sizes = subparsers.add_parser("sizes", help="List available VM sizes for given specs")
-    p_sizes.add_argument("--provider", default="azure", choices=["azure"])
+    p_sizes.add_argument("--provider", default="azure", choices=provider_names())
     p_sizes.add_argument("--location", default="CentralUS")
     p_sizes.add_argument("--cpu", type=int, default=1)
     p_sizes.add_argument("--ram", type=float, default=1)
@@ -297,7 +284,7 @@ def main():
         description="Interactive device-code flow by default; pass service-principal "
                     "flags for non-interactive auth with an existing SP.",
     )
-    p_auth.add_argument("provider", choices=["azure"], help="Cloud provider to authenticate with")
+    p_auth.add_argument("provider", choices=provider_names(), help="Cloud provider to authenticate with")
     p_auth.add_argument("--client-id", default=None, help="Existing service principal app/client ID")
     p_auth.add_argument("--client-secret", default=None,
                         help="SP client secret (or set ARM_CLIENT_SECRET)")

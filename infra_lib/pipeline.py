@@ -12,8 +12,17 @@ from .core.keys import ensure_key, key_path
 from .core.domain import default_caddyfile
 from .core.transfer import transfer, run_setup, start_service, ssh_exec
 from .core.health import wait_for_url, wait_for_port
-from .providers.azure.provision import provision, list_deployments as _raw_list, destroy
-from .providers.azure.sizes import resolve as resolve_size
+from .providers import get_provider
+
+
+def _management_provider():
+    """Provider used by name-only management ops (get/list/run/down/...).
+
+    Deployments don't yet record which provider created them, so these default
+    to the built-in provider. Once per-deployment provider is persisted, look it
+    up here instead. deploy() always uses the Infrastructure's own provider.
+    """
+    return get_provider()
 
 
 def deploy(infra: Infrastructure, ssh_key_path: str = None) -> Deployment:
@@ -31,6 +40,8 @@ def deploy(infra: Infrastructure, ssh_key_path: str = None) -> Deployment:
             "Multi-machine deployments aren't implemented yet (see todo.md). "
             "Pass a single machine for now."
         )
+    provider = get_provider(infra.provider)
+    user = provider.admin_user
     name = infra.name
     machine = infra.machines[0]
     domain = machine.domain
@@ -39,9 +50,9 @@ def deploy(infra: Infrastructure, ssh_key_path: str = None) -> Deployment:
 
     # Resolve the sizing request (ExpectedSpecs or exact VMSpec) into a concrete,
     # available VMSpec, and store it back so the deployment records what it got.
-    machine.hardware = resolve_size(machine.hardware, infra.location)
+    machine.hardware = provider.resolve(machine.hardware, infra.location)
 
-    outputs = provision(
+    outputs = provider.provision(
         name=name,
         location=infra.location,
         ssh_key_path=ssh_key_path,
@@ -61,25 +72,25 @@ def deploy(infra: Infrastructure, ssh_key_path: str = None) -> Deployment:
 
     has_content = bool(machine.ship or port)
     caddyfile = domain.caddyfile(port=port) if domain else (default_caddyfile(port=port) if has_content else None)
-    transfer(ip, ship=machine.ship, caddyfile=caddyfile, ssh_key_path=ssh_key_path)
+    transfer(ip, ship=machine.ship, caddyfile=caddyfile, ssh_key_path=ssh_key_path, user=user)
 
     if machine.setup:
-        run_setup(ip, machine.setup, ssh_key_path=ssh_key_path)
+        run_setup(ip, machine.setup, ssh_key_path=ssh_key_path, user=user)
 
     if machine.start:
-        start_service(ip, name, machine.start, ssh_key_path=ssh_key_path)
+        start_service(ip, name, machine.start, ssh_key_path=ssh_key_path, user=user)
 
     public_url = domain.url() if domain else (f"http://{ip}" if has_content else None)
 
     if public_url:
-        if port and not wait_for_port(ip, port, ssh_key_path):
+        if port and not wait_for_port(ip, port, ssh_key_path, user=user):
             r.warn(f"App is not listening on port {port} after 60s.")
             r.warn("Check your setup started the app, or SSH in and inspect logs.")
         if r.confirm_test():
             wait_for_url(public_url)
 
     services = [Service(port=port or 80, url=public_url)] if public_url else []
-    result = Deployment(name=name, ip=ip, ssh_key=ssh_key_path, services=services)
+    result = Deployment(name=name, ip=ip, ssh_key=ssh_key_path, user=user, services=services)
     r.finished(result)
     return result
 
@@ -92,26 +103,27 @@ def _to_deployment(d: dict) -> Deployment:
         name=d["name"],
         ip=ip if ip != "-" else "",
         ssh_key=d.get("ssh_key", key_path(d["name"])),
+        user=_management_provider().admin_user,
         services=services,
     )
 
 
 def get(name: str) -> Optional[Deployment]:
-    for d in _raw_list():
+    for d in _management_provider().list_deployments():
         if d["name"] == name:
             return _to_deployment(d)
     return None
 
 
 def list_deployments() -> list[Deployment]:
-    return [_to_deployment(d) for d in _raw_list()]
+    return [_to_deployment(d) for d in _management_provider().list_deployments()]
 
 
 def run(name: str, command: str) -> str:
     d = get(name)
     if not d:
         raise ValueError(f"Deployment '{name}' not found")
-    out, err, _ = ssh_exec(d.ip, command, d.ssh_key)
+    out, err, _ = ssh_exec(d.ip, command, d.ssh_key, user=d.user)
     return out + err if err else out
 
 
@@ -130,6 +142,11 @@ def connect(name: str) -> str:
 def logs(name: str, lines: int = 50) -> str:
     """Return the most recent journal logs for the deployment's service."""
     return run(name, f"sudo journalctl -u {name} -n {lines} --no-pager")
+
+
+def destroy(name: str, purge: bool = True) -> None:
+    """Tear down a deployment (lower-level; `down` is the API verb)."""
+    _management_provider().destroy(name, purge=purge)
 
 
 def down(name: str) -> None:

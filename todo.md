@@ -31,22 +31,31 @@ cli/ ──► pipeline ──► core/ + providers/ ──► progress
 **The model (`infra_lib/models.py`):**
 ```
 Infrastructure (input)        deploy(infra) -> Deployment (output)
-├── name, location
+├── name, location, provider
 └── machines: [Machine]
+        ├── name              (optional; identifies the machine)
         ├── hardware: VMSpec   (cpu, ram)
         ├── disk:     Disk     (size_gb, type)
         ├── ship / setup / start / ports
         └── domain:   Domain | None
 ```
-`infra.yml` stays flat (one machine) and maps onto `machines[0]` via
-`infra_lib/config.py`.
+`infra.yml` accepts both a **flat** one-machine form (maps onto `machines[0]`)
+and a **nested** `machines:` form (name -> config), via `infra_lib/config.py`.
+
+**Providers.** `pipeline.py`/CLI never import a cloud module directly — they go
+through `providers.get_provider(name) -> Provider` (see `providers/base.py` for
+the interface). To add a cloud, implement `Provider` and register it in
+`providers/__init__.py`. The provider owns its cloud-specific vocabulary
+(`admin_user`, `size_term`, `presets`); `core/` takes `user` as a parameter so it
+stays provider-agnostic.
 
 **Key files:**
 - `pipeline.py` — `deploy / get / list_deployments / run / logs / connect / down`
+- `providers/base.py` — the `Provider` interface; `providers/__init__.py` — registry
 - `core/transfer.py` — SSH/SFTP/rsync, `run_setup`, `start_service`, `ssh_exec`, `open_ssh`
 - `core/health.py` — `wait_for_port`, `wait_for_url`
 - `core/domain.py` — `Domain`/`BYODomain`/`CloudflareDomain`, `build_domain`, Caddyfile
-- `providers/azure/{auth,provision,sizes}.py` — Azure specifics (Pulumi, pricing, presets)
+- `providers/azure/{provider,auth,provision,sizes}.py` — Azure impl (Pulumi, pricing, presets)
 
 **Sanity check before/after any change:** `python3 -m compileall -q infra_lib && python3 -c "import infra_lib"`
 
@@ -109,9 +118,11 @@ and reads only its outputs (return None / handle the "stack not found" case). Th
 
 ## 3. Multi-machine deployment
 
-**Status.** The model supports `machines: [Machine, ...]`, but `pipeline.deploy()`
-currently handles only `machines[0]` and **raises `NotImplementedError` if given more**
-(intentional fail-loud guard, see `deploy()` top).
+**Status.** The model supports `machines: [Machine, ...]` (each with an optional
+`name`), and `config.py` now **parses** both the flat and nested `machines:` forms.
+But `pipeline.deploy()` still handles only `machines[0]` and **raises
+`NotImplementedError` if given more** (intentional fail-loud guard, see `deploy()` top).
+So provisioning N machines is the remaining work.
 
 **Fix.** Implement provisioning N machines. Considerations:
 - `provider/azure/provision.py` `_make_infrastructure` builds one VM + NIC + public IP.
@@ -119,7 +130,7 @@ currently handles only `machines[0]` and **raises `NotImplementedError` if given
 - `Deployment` output needs to represent multiple machines/IPs (today it's single
   `ip`/`ssh_key`). Probably `Deployment.machines: [MachineState]` or similar.
 - Each machine's `domain`/`ports`/`ship`/`setup`/`start` apply to that machine.
-- `infra.yml`: add optional `machines:` list form (keep flat single-machine form working).
+- Config parsing already done (`config._parse_machines`); flat form still works.
 - Remove the guard once done.
 
 ---
@@ -137,10 +148,13 @@ Use a small enum/Literal, not a free string.
 
 ---
 
-## 5. Model serialization + nested infra.yml
+## 5. Model serialization (for MCP / --json)
 
-**Why.** MCP (item 1) needs Infrastructure/Deployment ↔ JSON. Also lets `config.py`
-support a nested `machines:` list (item 3).
+**Why.** MCP (item 1) needs Infrastructure/Deployment ↔ JSON.
+
+**Status.** The *nested `machines:` infra.yml* part of this item is **done**
+(`config.py` parses flat and nested forms). The remaining piece is JSON
+serialization of the models.
 
 **Fix.** Add `to_dict()` / `from_dict()` (or use `dataclasses.asdict` + a hand-written
 `from_dict`) on `Infrastructure`, `Machine`, `Deployment`. `Domain` needs custom handling
@@ -196,14 +210,17 @@ configured.
   `port=80` because only `public_ip`/`url` are persisted in Pulumi outputs. If the app
   port matters after the fact (e.g. for `status`), persist it as a stack output in
   `provision._make_infrastructure` and read it back.
-- **Other providers.** `providers/` only has `azure/`. The layering is ready for a second
-  provider; provider selection is currently hardcoded to Azure in `pipeline.deploy`
-  (`from .providers.azure...`). A real multi-provider story needs a provider interface.
-- **`azureuser` is hardcoded in `core/transfer.py`.** The admin username appears in
-  `_connect`, the SFTP/`sudo mv` paths, `chown azureuser:azureuser`, and the rsync target
-  (`azureuser@{host}:...`). `transfer` lives in provider-agnostic `core/` but bakes in an
-  Azure detail. Thread the user through (it already exists as `Deployment.user`) as part
-  of the provider-interface work above.
+- **AWS / GCP providers.** The `Provider` interface and registry now exist
+  (`providers/base.py`, `providers/__init__.py`); `azure/` is the only impl. Adding a
+  cloud = a new `providers/<name>/` with a `Provider` subclass (provision/destroy/
+  list_deployments via that cloud's IaC + auth + sizing) registered in `_BUILTIN`. The
+  Azure impl scopes credentials to the whole subscription and opens 22/80/443 — replicate
+  the equivalents (and see the SSH-to-world note below) per cloud. *(Provider interface
+  itself: done. AWS/GCP impls: not started — only add when actually needed.)*
+- **Management ops don't know their provider.** `get/list/run/logs/connect/down` only have
+  a deployment name, so `pipeline._management_provider()` defaults to the built-in
+  provider. Once a second cloud exists, persist the provider per deployment (e.g. as a
+  Pulumi stack tag/output) and look it up there. Fine while Azure is the only provider.
 - **NSG opens SSH (22) to the world.** `providers/azure/provision.py` `_make_infrastructure`
   allows 22/80/443 from `*` (0.0.0.0/0). 80/443 must be public, but SSH being world-open
   invites scanning/brute-force (mitigated only by key-only auth). Consider restricting 22

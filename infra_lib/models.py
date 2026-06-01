@@ -53,6 +53,7 @@ class Machine:
     machine's IP and Caddy (TLS + reverse_proxy) runs on this machine. With
     several machines, each can carry its own domain.
     """
+    name: Optional[str] = None                           # identifies the machine (nested config)
     # The resolved VMSpec. May be given as an ExpectedSpecs (a request) at input
     # time; deploy()/the TUI resolve it into a concrete VMSpec before provisioning.
     hardware: "ExpectedSpecs | VMSpec" = field(default_factory=ExpectedSpecs)
@@ -66,9 +67,14 @@ class Machine:
 
 @dataclass
 class Infrastructure:
-    """The whole thing you're deploying: a container of machines."""
+    """The whole thing you're deploying: a container of machines.
+
+    `provider` names the cloud this lands on (see infra_lib.providers); it's an
+    infra-level choice, while sizing/disk/ports/etc. are per-Machine.
+    """
     name: str = "default"
     location: str = "CentralUS"
+    provider: str = "azure"
     machines: list[Machine] = field(default_factory=lambda: [Machine()])
 
 
