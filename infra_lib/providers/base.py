@@ -8,30 +8,26 @@ interface and register it in `providers/__init__.py`.
 Implementations are thin: the real work lives in the provider's own modules
 (e.g. providers/azure/{provision,sizes,auth}.py); the Provider just exposes a
 uniform surface over them.
+
+deploy() runs the same ordered steps for every unit — create -> ship -> setup ->
+start -> expose -> health — and a step no-ops when the substrate can't do it.
+The provider owns the steps that differ by substrate: create() (provision),
+start() (vm: systemd / pod: already running) and expose() (vm: Caddy+DNS / pod:
+the proxy URL it already has). ship/setup are shared SSH code the pipeline runs
+when the returned Endpoint has SSH.
 """
 from abc import ABC, abstractmethod
 
-from ..models import ExpectedSpecs, VMSpec
+from ..models import ExpectedSpecs, VMSpec, Endpoint, Unit
 
 
 class Provider(ABC):
     # --- identity / vocabulary -------------------------------------------------
     name: str = ""              # registry key, e.g. "azure"
-    admin_user: str = ""        # default admin/SSH user on provisioned VMs
+    admin_user: str = ""        # default admin/SSH user on created units
     size_term: str = "size"     # human term for an exact instance id (UI labels)
     presets: dict = {}          # {label: {"cpu", "ram_gb", "price", ...}}
-
-    # --- shape -----------------------------------------------------------------
-    # `kind` says where this provider enters the deploy pipeline:
-    #   "vm"             -> we get a raw box and build the substrate ourselves
-    #                       (provision -> prepare -> deliver -> configure -> expose).
-    #   "container_host" -> the provider runs a container for us; we just hand it
-    #                       image + ports + env via launch() (it absorbs the middle
-    #                       stages and gives back a URL).
-    # `workloads` is the set of workload shapes it can run: "process" and/or
-    # "container".
-    kind: str = "vm"
-    workloads: set = {"process"}
+    unit_type: str = "vm"       # the unit `type` this provider realizes: "vm" | "pod"
 
     # --- sizing ----------------------------------------------------------------
     @abstractmethod
@@ -50,11 +46,28 @@ class Provider(ABC):
         `gpu`/`gpu_type` filter to GPU sizes. Used by the `sizes` command;
         `resolve` is the path used by deploy."""
 
-    # --- provisioning ----------------------------------------------------------
+    # --- pipeline steps --------------------------------------------------------
     @abstractmethod
-    def provision(self, name: str, location: str, ssh_key_path: str,
-                  vm_spec: VMSpec, storage_gb: int = 30) -> dict:
-        """Create the infrastructure; return outputs (must include 'public_ip')."""
+    def create(self, name: str, location: str, ssh_key_path: str, unit: Unit) -> Endpoint:
+        """Provision the unit and return a reachable Endpoint.
+
+        For a vm this brings up a box and waits until it accepts SSH. For a pod it
+        creates the container from `unit.image` and returns its proxy URL (and an
+        SSH endpoint when the pod exposes one). The returned Endpoint's `has_ssh`
+        decides whether the pipeline runs ship/setup."""
+
+    def start(self, endpoint: Endpoint, name: str, unit: Unit) -> None:
+        """Bring up `unit.start` as a supervised service.
+
+        Default no-op: a pod's command is its container CMD, already running from
+        create(). A vm overrides this to install a systemd service over SSH."""
+
+    def expose(self, endpoint: Endpoint, name: str, unit: Unit) -> str | None:
+        """Make the app reachable and return its public URL.
+
+        Default returns the URL the Endpoint already carries (a pod's proxy URL).
+        A vm overrides this to configure Caddy (TLS + reverse_proxy) and DNS."""
+        return endpoint.url
 
     @abstractmethod
     def destroy(self, name: str, purge: bool = True) -> None:
@@ -64,21 +77,11 @@ class Provider(ABC):
     def list_deployments(self) -> list[dict]:
         """All deployments as [{name, ip, url, ssh_key}]."""
 
-    # --- container host (kind == "container_host") -----------------------------
-    def launch(self, name: str, vm_spec: VMSpec, image: str, ports: list,
-               env: dict = None, command: str = None, storage_gb: int = 30) -> dict:
-        """Run `image` directly on the provider and return {url, handle, ...}.
-
-        The provider's single create call stands in for provision+deliver+
-        configure+expose. Only container-host providers implement this.
-        """
-        raise NotImplementedError(f"{self.name} is not a container host.")
-
     # --- power (optional) ------------------------------------------------------
     # Stop/resume a deployment without destroying it. Optional: providers that
     # can't do this leave the defaults, which report it isn't supported.
     def pause(self, name: str) -> None:
-        """Stop compute billing while keeping the disk (resume later)."""
+        """Stop compute billing while keeping the disk/volume (resume later)."""
         raise NotImplementedError(f"The {self.name} provider doesn't support pause.")
 
     def resume(self, name: str) -> None:

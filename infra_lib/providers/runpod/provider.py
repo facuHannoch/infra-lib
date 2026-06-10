@@ -1,15 +1,14 @@
 """RunPodProvider: a GPU container host behind the Provider interface.
 
-RunPod runs a container image you give it and returns an HTTPS proxy URL, so it's
-a `kind == "container_host"` provider — deploy() calls launch() instead of the
-VM pipeline. The `runpod` SDK is imported lazily so selecting the provider for
-sizing/auth stays cheap.
-
-NOTE: the live API calls below can't be exercised without an API key + GPU quota;
-they're written against the runpod SDK and verified structurally only.
+RunPod realizes `pod` units: it boots a container from `unit.image` and returns a
+proxy URL. Provisioning goes through Pulumi (see provision.py), exactly like
+Azure — so create/destroy/list share that shape. start()/expose() use the base
+no-op/return-URL defaults: a pod's command is its container CMD (set at create)
+and its URL is the proxy URL. ship/setup work only when the pod exposes SSH
+(start_ssh + a readable 22/tcp mapping); otherwise the pipeline skips them.
 """
 from ..base import Provider
-from ...models import ExpectedSpecs, VMSpec
+from ...models import ExpectedSpecs, VMSpec, Endpoint, Unit
 from ... import progress
 from . import sizes as _sizes
 from . import auth as _auth
@@ -17,11 +16,10 @@ from . import auth as _auth
 
 class RunPodProvider(Provider):
     name = "runpod"
-    admin_user = "root"           # containers run as root
+    admin_user = "root"           # containers run as root (no sudo)
     size_term = _sizes.SIZE_TERM
     presets = _sizes.RUNPOD_PRESETS
-    kind = "container_host"
-    workloads = {"container"}
+    unit_type = "pod"
 
     # --- sizing ----------------------------------------------------------------
     def preset_specs(self, label: str) -> ExpectedSpecs:
@@ -35,94 +33,54 @@ class RunPodProvider(Provider):
         return _sizes.list_sizes(min_cpu=min_cpu, min_ram_gb=min_ram_gb,
                                  gpu=gpu, gpu_type=gpu_type)
 
-    # --- container host --------------------------------------------------------
-    def launch(self, name: str, vm_spec: VMSpec, image: str, ports: list,
-               env: dict = None, command: str = None, storage_gb: int = 30) -> dict:
-        import runpod
-        _auth.load_runpod_key()
+    # --- pipeline steps --------------------------------------------------------
+    def create(self, name: str, location: str, ssh_key_path: str, unit: Unit) -> Endpoint:
+        from . import provision as _provision
+        # Enable SSH only when there's something to ship/run over it. Inject our
+        # public key so we're authorized on the pod.
+        want_ssh = bool(unit.ship or unit.setup)
+        env = dict(unit.env)
+        if want_ssh:
+            with open(f"{ssh_key_path}.pub") as f:
+                env["PUBLIC_KEY"] = f.read().strip()
 
-        http_ports = list(ports) if ports else [80]
-        ports_str = ",".join(f"{p}/http" for p in http_ports)
-
-        progress.step(f"Launching {vm_spec.type} pod for {image}")
-        pod = runpod.create_pod(
-            name=name,
-            image_name=image,
-            gpu_type_id=vm_spec.type,
-            gpu_count=max(vm_spec.gpus, 1),
-            cloud_type="ALL",
-            # volume persists across stop/resume; container disk holds the image.
-            volume_in_gb=storage_gb,
-            container_disk_in_gb=max(storage_gb, 20),
-            ports=ports_str,
-            env=env or {},
-            docker_args=command or "",
+        pod_id, url = _provision.create(
+            name=name, vm_spec=unit.hardware, image=unit.image, ports=unit.ports,
+            env=env, command=unit.start, storage_gb=unit.disk.size_gb, start_ssh=want_ssh,
         )
-        pod_id = pod["id"]
-        self._wait_running(pod_id)
 
-        # RunPod exposes each http port at a stable proxy hostname.
-        url = f"https://{pod_id}-{http_ports[0]}.proxy.runpod.net"
-        progress.done(f"Pod running: {url}")
-        return {"url": url, "handle": pod_id, "ip": pod_id}
+        host, port, has_ssh = pod_id, 22, False
+        if want_ssh:
+            ssh_host, ssh_port = _provision.ssh_endpoint(pod_id)
+            if ssh_host:
+                host, port, has_ssh = ssh_host, ssh_port, True
+            else:
+                progress.reporter().warn(
+                    "Pod SSH endpoint not available yet — skipping ship/setup. "
+                    "Bake files into the image, or retry once the pod is fully up.")
 
-    def _wait_running(self, pod_id: str, timeout: int = 300):
-        import time
-        import runpod
-        deadline = time.time() + timeout
-        with progress.status("Waiting for pod to start..."):
-            while time.time() < deadline:
-                pod = runpod.get_pod(pod_id)
-                if pod and pod.get("runtime"):
-                    return
-                time.sleep(5)
-        raise TimeoutError(f"RunPod pod {pod_id} did not start within {timeout}s")
+        if url:
+            progress.done(f"Pod running: {url}")
+        return Endpoint(host=host, user=self.admin_user, ssh_port=port, sudo=False,
+                        has_ssh=has_ssh, ssh_key=ssh_key_path, url=url, handle=pod_id)
 
-    # --- lifecycle / management ------------------------------------------------
-    def _find_pod(self, name: str):
-        import runpod
-        _auth.load_runpod_key()
-        for p in runpod.get_pods():
-            if p.get("name") == name:
-                return p
-        return None
-
-    def provision(self, *args, **kwargs):
-        raise NotImplementedError("RunPod is a container host — deploy() uses launch().")
+    # start()/expose() use the base defaults (no-op / return endpoint.url).
 
     def destroy(self, name: str, purge: bool = True) -> None:
-        import runpod
-        pod = self._find_pod(name)
-        if not pod:
-            raise RuntimeError(f"No RunPod pod named '{name}'.")
-        runpod.terminate_pod(pod["id"])
+        from . import provision as _provision
+        _provision.destroy(name, purge=purge)
 
     def list_deployments(self) -> list[dict]:
-        import runpod
-        _auth.load_runpod_key()
-        out = []
-        for p in runpod.get_pods():
-            out.append({"name": p.get("name", "-"), "ip": p.get("id", "-"),
-                        "url": "-", "ssh_key": "-"})
-        return out
+        from . import provision as _provision
+        return _provision.list_deployments()
 
     def pause(self, name: str) -> None:
-        import runpod
-        pod = self._find_pod(name)
-        if not pod:
-            raise RuntimeError(f"No RunPod pod named '{name}'.")
-        progress.step(f"Pausing {name}")
-        runpod.stop_pod(pod["id"])
-        progress.done(f"{name} paused — GPU released")
+        from . import provision as _provision
+        _provision.pause(name)
 
     def resume(self, name: str) -> None:
-        import runpod
-        pod = self._find_pod(name)
-        if not pod:
-            raise RuntimeError(f"No RunPod pod named '{name}'.")
-        progress.step(f"Resuming {name}")
-        runpod.resume_pod(pod["id"], gpu_count=1)
-        progress.done(f"{name} resumed")
+        from . import provision as _provision
+        _provision.resume(name)
 
     # --- auth ------------------------------------------------------------------
     def load_credentials(self) -> None:

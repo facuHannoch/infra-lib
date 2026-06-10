@@ -1,5 +1,3 @@
-- [ ] currently all copied directories go to `/srv/files`. Allow to put them in a specific location, maybe with a port-like sintax, like `root/dir:absolute/path/to/dir. Note that the first (what to copy) is relative, but the second (destination, where to copy) is absolute
-
 # infra-lib — pending work
 
 This file is the backlog. Each item is written to be actionable by someone (or an
@@ -34,15 +32,27 @@ cli/ ──► pipeline ──► core/ + providers/ ──► progress
 ```
 Infrastructure (input)        deploy(infra) -> Deployment (output)
 ├── name, location, provider
-└── machines: [Machine]
-        ├── name              (optional; identifies the machine)
-        ├── hardware: VMSpec   (cpu, ram)
+└── units: [Unit]
+        ├── name              (optional; identifies the unit)
+        ├── type              "vm" | "pod"  (the discriminator)
+        ├── hardware: VMSpec   (cpu, ram, gpus)
         ├── disk:     Disk     (size_gb, type)
-        ├── ship / setup / start / ports
+        ├── ship: [ShipItem]   (src + optional dest)
+        ├── setup / start / ports / env
+        ├── image / build / registry   (pod: boots from image)
         └── domain:   Domain | None
 ```
-`infra.yml` accepts both a **flat** one-machine form (maps onto `machines[0]`)
-and a **nested** `machines:` form (name -> config), via `infra_lib/config.py`.
+`infra.yml` accepts both a **flat** one-unit form (maps onto `units[0]`) and a
+**nested** `units:`/`machines:` form (name -> config), via `infra_lib/config.py`.
+The provider is derived from a unit's `type` (vm->azure, pod->runpod) unless set.
+
+**The deploy model (`plan.md` is the canonical writeup).** One `unit` with a
+`type`; `deploy()` runs the same ordered steps for every unit —
+create -> ship -> setup -> start -> expose -> health — and a step no-ops when the
+substrate can't do it (a pod with no SSH skips ship/setup). The provider owns the
+steps that differ by substrate (`create`/`start`/`expose`); ship/setup are shared
+SSH code. Azure realizes `vm` (Pulumi VM + Caddy/systemd over SSH); RunPod
+realizes `pod` (Pulumi `pulumi_runpod.Pod`, image-booted, proxy URL).
 
 **Providers.** `pipeline.py`/CLI never import a cloud module directly — they go
 through `providers.get_provider(name) -> Provider` (see `providers/base.py` for
@@ -223,23 +233,23 @@ configured.
   (`core/registry.py`, `~/.infra-lib/deployments/<name>.json`) records `{provider, handle}`
   at deploy time; `pipeline._provider_for(name)` routes get/list/down/pause to the right
   provider (falling back to Azure for legacy stacks). *Done.*
-- **RunPod / container workload — live-untested.** `providers/runpod/` and the container
-  path in `pipeline._deploy_container` + `core/container.py` are written against the
-  `runpod` SDK and `docker` CLI but never run live (no API key / GPU quota / registry at
-  build time). First real RunPod deploy needs: `pip install runpod`, an API key
-  (`infra-lib auth runpod --api-key …`), and a `docker login ghcr.io`. Verify pod create/
-  proxy-URL/stop/resume/terminate field names against the SDK then.
-- **Container-on-VM (Docker on Azure) not wired.** Azure declares `workloads = {"process"}`,
-  so an `image:`/`build:` deploy to Azure is refused up front. To support it: install Docker
-  in `prepare`, `docker run -d --restart=always` the image, Caddy in front. This is the
-  second half of the two-axis design (the VM provider running a container workload).
-- **Private GHCR pull (`pull_secret`).** Container push uses the user's ambient
-  `docker login`; pulling a *private* image on RunPod needs read creds passed into the pod
-  spec. First cut assumes public images. Add a `pull_secret`/registry-cred path when needed.
-- **Purify the process path through the seams.** `_deploy_process` is still the original
-  inline VM logic (Caddy/DNS/systemd in the pipeline), kept as-is for low risk. The clean
-  version expresses it via provider `prepare()`/`expose()` + a workload `supervise()`/
-  `deliver()`, same as the container path — do this when touching it next.
+- **RunPod (`pod` units) — live-untested.** `providers/runpod/{provider,provision}.py`
+  provision a `pulumi_runpod.Pod` via the Pulumi Automation API (mirrors Azure); the
+  `runpod` SDK is used only for the SSH-mapping read (`ssh_endpoint`) and pause/resume
+  (`stop_pod`/`resume_pod`). None of it has run live (no API key / GPU quota / `pulumi-runpod`
+  installed at build time). First real deploy needs: `pip install pulumi-runpod runpod`,
+  an API key (`infra-lib auth runpod --api-key …`), and (for `build:`) `docker login ghcr.io`.
+  Then verify against the live API: Pod create + the `pod_id`/proxy-URL outputs, whether
+  the 22/tcp runtime mapping is readable right after `up` (it may need polling — today
+  `ssh_endpoint` tries once and falls back to SSH-less), and that `stop_pod`/`resume_pod`
+  are the right power verbs (Pulumi doesn't model power).
+- **Ship into a pod needs the image to run sshd.** `create()` sets `start_ssh=True` and
+  injects `PUBLIC_KEY` only when the unit has `ship`/`setup`. The pod's base image must
+  actually start an SSH daemon for rsync to land; otherwise `ssh_endpoint` returns nothing
+  and ship/setup are skipped (with a warning). Document which images support this.
+- **Private GHCR pull (`pull_secret`).** `build:` push uses the user's ambient
+  `docker login`; pulling a *private* image into a pod needs read creds in the pod spec.
+  First cut assumes public images. Add a `pull_secret`/registry-cred path when needed.
 - **NSG opens SSH (22) to the world.** `providers/azure/provision.py` `_make_infrastructure`
   allows 22/80/443 from `*` (0.0.0.0/0). 80/443 must be public, but SSH being world-open
   invites scanning/brute-force (mitigated only by key-only auth). Consider restricting 22
@@ -253,7 +263,7 @@ configured.
   long as the model is "a human runs `infra-lib auth azure` once; the agent reuses the
   saved creds" — document that for the MCP layer. If auth ever needs to be programmatic,
   route its prompts through a Reporter callback and accept a pre-chosen subscription id.
-- **Redundant readiness waits.** Both `transfer()` and `run_setup()` call
-  `_wait_for_ssh` + `_wait_for_cloud_init` at the top, so a single deploy prints
-  "Cloud-init complete" twice. Harmless, just noisy — could hoist the wait to the start of
-  `pipeline.deploy` once and skip it in the steps.
+- **Readiness waits.** *Mostly resolved by the redesign:* `azure.create()` now does the
+  SSH wait + cloud-init wait once before returning the Endpoint; `transfer()`/`run_setup()`
+  no longer wait for cloud-init (run_setup still does a cheap defensive SSH wait). If
+  trimming further, drop run_setup's wait too.

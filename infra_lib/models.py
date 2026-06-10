@@ -13,7 +13,7 @@ class ExpectedSpecs:
     """What you ask for: minimum cpu/ram (+ optional GPU). Transient, provider-agnostic.
 
     Resolved into a concrete VMSpec by the provider (see resolve()). Never stored
-    on a Machine — it's only an input that produces a VMSpec.
+    on a Unit — it's only an input that produces a VMSpec.
 
     GPU is an orthogonal axis: a GPU SKU bundles its own cpu/ram, so when `gpu`
     is requested the cpu/ram fields act as additional minimums (usually moot).
@@ -29,10 +29,10 @@ class ExpectedSpecs:
 class VMSpec:
     """A concrete machine size: the provider's instance identifier plus its specs.
 
-    This is what a Machine stores. Produced by resolving an ExpectedSpecs (cheapest
+    This is what a Unit stores. Produced by resolving an ExpectedSpecs (cheapest
     that satisfies it) or by naming an exact `type` directly. `type` is the provider
-    instance id (Azure SKU, e.g. 'Standard_D2s_v3'); cpu/ram/price are filled in by
-    resolution and used for display.
+    instance id (Azure SKU, e.g. 'Standard_D2s_v3'; a RunPod GPU id); cpu/ram/price
+    are filled in by resolution and used for display.
     """
     type: str
     cpu: int = 0
@@ -48,71 +48,95 @@ class VMSpec:
 
 @dataclass
 class Disk:
-    """A machine's storage. Its own object so it can grow (premium, data disks)."""
+    """A unit's storage. Its own object so it can grow (premium, data disks)."""
     size_gb: int = 30
     type: str = "standard"
 
 
 @dataclass
 class Endpoint:
-    """How to reach a provisioned host. Returned by a provider's provision().
+    """How to reach a created unit. Returned by a provider's create().
 
     Generalizes "a public IP you SSH into on port 22 as azureuser": a RunPod pod
-    is reached on a different host/port as root, and is already root (no sudo).
-    Lets the shared transfer/health code work against any provider's box.
+    is reached on a different host/port as root (no sudo), may expose no SSH at
+    all, and already knows its public URL. The shared transfer/health/start code
+    keys its behavior off this — e.g. ship/setup run only when `has_ssh`.
     """
     host: str
     user: str = "azureuser"
     ssh_port: int = 22
     sudo: bool = True
+    has_ssh: bool = True
+    ssh_key: Optional[str] = None      # private key path used to reach it over SSH
+    url: Optional[str] = None          # known at create time for pods (proxy URL)
+    handle: Optional[str] = None       # provider's id for management (defaults to the name)
+
+    @property
+    def home(self) -> str:
+        """The login user's home dir, for expanding `~` in ship destinations."""
+        return "/root" if self.user == "root" else f"/home/{self.user}"
 
 
 @dataclass
-class Machine:
-    """One machine and the workload that runs on it.
+class ShipItem:
+    """One `ship` entry: a local source dir and where it lands on the unit.
 
-    Two workload shapes (see `is_container`):
-      - process:   ship a directory, run setup, supervise `start` via systemd. VM-only.
-      - container: run an image (`image` ref, or `build` a Dockerfile dir and push
-                   to `registry`). Runs on a container host (RunPod) or a VM w/ Docker.
-    They're mutually exclusive; presence of image/build selects the container shape.
+    `dest` is None for the default location (/srv/files/<basename>); otherwise an
+    absolute or ~-relative remote path the source's contents are placed *at*.
+    """
+    src: str
+    dest: Optional[str] = None
+
+
+@dataclass
+class Unit:
+    """One unit of deployment and the work that runs on it.
+
+    A unit has a `type` — `vm` (a box we fill: ship + setup + a systemd `start`)
+    or `pod` (a container host like RunPod that boots from `image`). `type` is a
+    realization detail, not a separate object: the deploy pipeline runs the same
+    ordered steps for every unit and a step no-ops when the substrate can't do it
+    (e.g. a pod with no SSH skips ship/setup). See pipeline.deploy().
+
+    Fields are a superset; which ones apply depends on `type`:
+      - both:  resources (hardware/disk/ports), setup, start, env, domain
+      - vm:    ship (rsync), start -> systemd service
+      - pod:   image (required — it boots from this), start -> container CMD
 
     `domain` lives here, not on Infrastructure: the DNS A record points at this
-    machine's IP and Caddy (TLS + reverse_proxy) runs on this machine. With
-    several machines, each can carry its own domain.
+    unit and Caddy (TLS + reverse_proxy) runs on it. With several units, each can
+    carry its own domain.
     """
-    name: Optional[str] = None                           # identifies the machine (nested config)
+    name: Optional[str] = None                           # identifies the unit (nested config)
+    type: str = "vm"                                     # vm | pod (the discriminator)
     # The resolved VMSpec. May be given as an ExpectedSpecs (a request) at input
-    # time; deploy()/the TUI resolve it into a concrete VMSpec before provisioning.
+    # time; deploy()/the TUI resolve it into a concrete VMSpec before creating.
     hardware: "ExpectedSpecs | VMSpec" = field(default_factory=ExpectedSpecs)
     disk: Disk = field(default_factory=Disk)
-    ship: list[str] = field(default_factory=list)       # directories to rsync over (process)
-    setup: list[str] = field(default_factory=list)       # run once, must exit (process)
-    start: Optional[str] = None                          # process: systemd service; container: CMD override
+    ship: list[ShipItem] = field(default_factory=list)   # dirs to rsync (where SSH is available)
+    setup: list[str] = field(default_factory=list)       # run once, must exit (where SSH is available)
+    start: Optional[str] = None                          # vm: systemd service; pod: container CMD
     ports: list[int] = field(default_factory=list)       # app ports to expose
     domain: Optional["Domain"] = None
-    # --- container workload ---
-    image: Optional[str] = None                          # image ref to run, e.g. ghcr.io/me/app:latest
+    env: dict = field(default_factory=dict)              # env vars (systemd Environment= / pod env)
+    # --- pod / image ---
+    image: Optional[str] = None                          # image to boot, e.g. ghcr.io/me/app:latest
     build: Optional[str] = None                          # dir with a Dockerfile to build + push
     registry: Optional[str] = None                       # push target for `build`, e.g. ghcr.io/me
-    env: dict = field(default_factory=dict)              # env vars for the container
-
-    @property
-    def is_container(self) -> bool:
-        return bool(self.image or self.build)
 
 
 @dataclass
 class Infrastructure:
-    """The whole thing you're deploying: a container of machines.
+    """The whole thing you're deploying: a container of units.
 
     `provider` names the cloud this lands on (see infra_lib.providers); it's an
-    infra-level choice, while sizing/disk/ports/etc. are per-Machine.
+    infra-level choice, while sizing/disk/ports/etc. are per-Unit. By default the
+    provider is derived from the unit's `type` (vm -> azure, pod -> runpod).
     """
     name: str = "default"
     location: str = "CentralUS"
     provider: str = "azure"
-    machines: list[Machine] = field(default_factory=lambda: [Machine()])
+    units: list[Unit] = field(default_factory=lambda: [Unit()])
 
 
 # --- Live state (output) -----------------------------------------------------

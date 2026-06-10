@@ -37,8 +37,14 @@ def load_runpod_key() -> str:
             "No RunPod API key found. Run 'infra-lib auth runpod --api-key <KEY>' "
             "or set RUNPOD_API_KEY. Get a key at https://www.runpod.io/console/user/settings"
         )
-    import runpod
-    runpod.api_key = key
+    # The pulumi-runpod provider authenticates from this env var; set it first so
+    # provisioning works even if the (optional) runpod SDK isn't installed.
+    os.environ["RUNPOD_API_KEY"] = key
+    try:
+        import runpod
+        runpod.api_key = key
+    except ImportError:
+        pass
     return key
 
 

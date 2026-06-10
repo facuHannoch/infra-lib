@@ -1,8 +1,13 @@
 """The deploy pipeline and management operations.
 
-`deploy()` is provider-agnostic orchestration. It reports progress and asks for
-interaction through the active Reporter (see progress.py): silent by default
-(API / MCP), interactive when the CLI installs a console reporter.
+`deploy()` is provider-agnostic orchestration: it runs the same ordered steps for
+every unit — create -> ship -> setup -> start -> expose -> health — and a step
+no-ops when the substrate can't do it (a pod with no SSH skips ship/setup). The
+provider owns the steps that differ by substrate (create/start/expose); ship and
+setup are shared SSH code run here when the unit's Endpoint exposes SSH.
+
+It reports progress and asks for interaction through the active Reporter (see
+progress.py): silent by default (API / MCP), interactive under the CLI.
 """
 from typing import Optional
 
@@ -10,8 +15,7 @@ from . import progress
 from .models import Infrastructure, Deployment, Service
 from .core import registry
 from .core.keys import ensure_key, key_path
-from .core.domain import default_caddyfile
-from .core.transfer import transfer, run_setup, start_service, ssh_exec
+from .core.transfer import transfer, run_setup, ssh_exec
 from .core.health import wait_for_url, wait_for_port
 from .providers import get_provider
 
@@ -28,127 +32,73 @@ def _provider_for(name: str):
 def deploy(infra: Infrastructure, ssh_key_path: str = None) -> Deployment:
     """Provision `infra` and return the live Deployment.
 
-    Picks the path from two axes: the workload (process vs container, inferred
-    from the machine) and the provider's `kind` (vm vs container_host). Operates
-    on a single machine for now (infra.machines[0]). Silent by default — progress
-    flows through the active Reporter (see progress.py).
+    Operates on a single unit for now (infra.units[0]). Silent by default —
+    progress flows through the active Reporter (see progress.py).
     """
-    if not infra.machines:
-        raise ValueError("Infrastructure has no machines to deploy.")
-    if len(infra.machines) > 1:
+    if not infra.units:
+        raise ValueError("Infrastructure has no units to deploy.")
+    if len(infra.units) > 1:
         raise NotImplementedError(
-            "Multi-machine deployments aren't implemented yet (see todo.md). "
-            "Pass a single machine for now."
+            "Multi-unit deployments aren't implemented yet (see todo.md). "
+            "Pass a single unit for now."
         )
     provider = get_provider(infra.provider)
-    machine = infra.machines[0]
-    workload = "container" if machine.is_container else "process"
-    if workload not in provider.workloads:
+    unit = infra.units[0]
+    if unit.type != provider.unit_type:
         raise ValueError(
-            f"The {provider.name} provider can't run a '{workload}' workload "
-            f"(it supports: {', '.join(sorted(provider.workloads))}). "
-            + ("Give it an image/build to run a container."
-               if workload == "process"
-               else "Drop image/build to deploy files+process, or pick a container host.")
+            f"The {provider.name} provider realizes '{provider.unit_type}' units, "
+            f"not '{unit.type}'. Use a matching provider or change the unit's type."
         )
 
-    if workload == "container":
-        return _deploy_container(infra, provider, machine)
-    return _deploy_process(infra, provider, machine, ssh_key_path)
-
-
-def _deploy_process(infra, provider, machine, ssh_key_path=None) -> Deployment:
-    """The VM path: provision a box, ship files, supervise via systemd, expose."""
     r = progress.reporter()
-    user = provider.admin_user
     name = infra.name
-    domain = machine.domain
-    port = machine.ports[0] if machine.ports else None
     ssh_key_path = ssh_key_path or ensure_key(name)
 
     # Resolve the sizing request (ExpectedSpecs or exact VMSpec) into a concrete,
     # available VMSpec, and store it back so the deployment records what it got.
-    machine.hardware = provider.resolve(machine.hardware, infra.location)
+    unit.hardware = provider.resolve(unit.hardware, infra.location)
 
-    outputs = provider.provision(
-        name=name,
-        location=infra.location,
-        ssh_key_path=ssh_key_path,
-        vm_spec=machine.hardware,
-        storage_gb=machine.disk.size_gb,
-    )
-    ip = outputs["public_ip"]
-    r.show_ip(ip)
-
-    if domain:
-        if domain.auto_dns:
-            r.step(f"Provisioning DNS for {domain.name}")
-            domain.provision_dns(ip)
-            r.done("DNS configured")
-        else:
-            r.need_dns(domain, ip)
-
-    has_content = bool(machine.ship or port)
-    caddyfile = domain.caddyfile(port=port) if domain else (default_caddyfile(port=port) if has_content else None)
-    transfer(ip, ship=machine.ship, caddyfile=caddyfile, ssh_key_path=ssh_key_path, user=user)
-
-    if machine.setup:
-        run_setup(ip, machine.setup, ssh_key_path=ssh_key_path, user=user)
-
-    if machine.start:
-        start_service(ip, name, machine.start, ssh_key_path=ssh_key_path, user=user)
-
-    public_url = domain.url() if domain else (f"http://{ip}" if has_content else None)
-
-    if public_url:
-        if port and not wait_for_port(ip, port, ssh_key_path, user=user):
-            r.warn(f"App is not listening on port {port} after 60s.")
-            r.warn("Check your setup started the app, or SSH in and inspect logs.")
-        if r.confirm_test():
-            wait_for_url(public_url)
-
-    services = [Service(port=port or 80, url=public_url)] if public_url else []
-    result = Deployment(name=name, ip=ip, ssh_key=ssh_key_path, user=user, services=services)
-    registry.record(name, provider.name, handle=name, url=public_url or "", ssh_key=ssh_key_path)
-    r.finished(result)
-    return result
-
-
-def _deploy_container(infra, provider, machine) -> Deployment:
-    """The container path: package an image and run it.
-
-    On a container host (RunPod) the provider's launch() does provision+run+
-    expose in one call. (Container-on-VM isn't wired yet — see todo.md.)
-    """
-    r = progress.reporter()
-    name = infra.name
-    machine.hardware = provider.resolve(machine.hardware, infra.location)
-
-    if machine.build:
+    # Package: a `build` dir is turned into an image ref before create() runs.
+    if unit.build:
         from .core.container import build_and_push
-        image = build_and_push(machine.build, machine.registry, name)
-    else:
-        image = machine.image
+        unit.image = build_and_push(unit.build, unit.registry, name)
 
-    if provider.kind != "container_host":
-        raise NotImplementedError(
-            "Running a container on a VM provider (Docker-on-VM) isn't wired yet — "
-            "use a container host like 'runpod'. See todo.md."
-        )
+    # 1. create the substrate (and, for a pod, the running container).
+    endpoint = provider.create(name, infra.location, ssh_key_path, unit)
 
-    out = provider.launch(
-        name=name, vm_spec=machine.hardware, image=image,
-        ports=machine.ports, env=machine.env, command=machine.start,
-        storage_gb=machine.disk.size_gb,
-    )
-    url, handle = out.get("url"), out.get("handle", name)
-    port = machine.ports[0] if machine.ports else 80
+    # 2-3. ship + setup — only where the substrate gives us SSH.
+    if endpoint.has_ssh:
+        transfer(endpoint.host, ship=unit.ship, ssh_key_path=endpoint.ssh_key,
+                 user=endpoint.user, port=endpoint.ssh_port, home=endpoint.home,
+                 sudo=endpoint.sudo)
+        if unit.setup:
+            run_setup(endpoint.host, unit.setup, ssh_key_path=endpoint.ssh_key,
+                      user=endpoint.user, port=endpoint.ssh_port)
+    elif unit.ship or unit.setup:
+        r.warn("Skipped ship/setup: this unit has no SSH access.")
 
-    registry.record(name, provider.name, handle=handle, url=url or "", ssh_key="")
-    services = [Service(port=port, url=url)] if url else []
-    result = Deployment(name=name, ip=handle, ssh_key="", user=provider.admin_user, services=services)
-    if url and r.confirm_test():
-        wait_for_url(url)
+    # 4. start the long-running command (vm: systemd; pod: already running).
+    provider.start(endpoint, name, unit)
+
+    # 5. expose (vm: Caddy + DNS; pod: the proxy URL it already has).
+    url = provider.expose(endpoint, name, unit)
+
+    # 6. health.
+    port = unit.ports[0] if unit.ports else None
+    if url:
+        if port and endpoint.has_ssh and endpoint.ssh_port == 22:
+            if not wait_for_port(endpoint.host, port, endpoint.ssh_key, user=endpoint.user):
+                r.warn(f"App is not listening on port {port} after 60s.")
+                r.warn("Check your setup started the app, or SSH in and inspect logs.")
+        if r.confirm_test():
+            wait_for_url(url)
+
+    services = [Service(port=port or 80, url=url)] if url else []
+    ssh_key = endpoint.ssh_key if endpoint.has_ssh else ""
+    result = Deployment(name=name, ip=endpoint.host, ssh_key=ssh_key,
+                        user=endpoint.user, services=services)
+    registry.record(name, provider.name, handle=endpoint.handle or name,
+                    url=url or "", ssh_key=ssh_key)
     r.finished(result)
     return result
 
@@ -157,10 +107,13 @@ def _to_deployment(d: dict, provider_name: str = "azure") -> Deployment:
     ip = d.get("ip", "")
     url = d.get("url", "")
     services = [Service(port=80, url=url)] if url and url != "-" else []
+    ssh_key = d.get("ssh_key", key_path(d["name"]))
+    if ssh_key == "-":
+        ssh_key = ""
     return Deployment(
         name=d["name"],
         ip=ip if ip != "-" else "",
-        ssh_key=d.get("ssh_key", key_path(d["name"])),
+        ssh_key=ssh_key,
         user=get_provider(provider_name).admin_user,
         services=services,
     )
@@ -194,7 +147,7 @@ def run(name: str, command: str) -> str:
     if not d:
         raise ValueError(f"Deployment '{name}' not found")
     if not d.ssh_key:
-        raise ValueError(f"'{name}' is a container deployment — SSH (run/logs/connect) isn't available.")
+        raise ValueError(f"'{name}' has no SSH access — run/logs/connect aren't available.")
     out, err, _ = ssh_exec(d.ip, command, d.ssh_key, user=d.user)
     return out + err if err else out
 
@@ -209,7 +162,7 @@ def connect(name: str) -> str:
     if not d:
         raise ValueError(f"Deployment '{name}' not found")
     if not d.ssh_key:
-        raise ValueError(f"'{name}' is a container deployment — SSH isn't available.")
+        raise ValueError(f"'{name}' has no SSH access — connect isn't available.")
     return d.ssh_command
 
 

@@ -3,13 +3,13 @@
 Public API (suitable for programmatic / MCP use; silent by default):
 
     import infra_lib
-    from infra_lib import Infrastructure, Machine, ExpectedSpecs, VMSpec, Disk
+    from infra_lib import Infrastructure, Unit, ExpectedSpecs, VMSpec, Disk, ShipItem
 
     infra = Infrastructure(
         name="myapp",
-        machines=[Machine(hardware=ExpectedSpecs(cpu=2, ram_gb=8),   # or VMSpec(type="Standard_D2s_v3")
-                          disk=Disk(size_gb=30),
-                          ship=["."], start="...", ports=[3000])],
+        units=[Unit(hardware=ExpectedSpecs(cpu=2, ram_gb=8),   # or VMSpec(type="Standard_D2s_v3")
+                    disk=Disk(size_gb=30),
+                    ship=[ShipItem(".")], start="...", ports=[3000])],
     )
     d = infra_lib.deploy(infra)   # resolves hardware to a concrete VMSpec, then provisions
     print(d.url, d.ip, d.ssh_command)
@@ -27,7 +27,7 @@ import logging as _logging
 # Diagnostics go through this logger; user-facing narrative goes through progress.
 _logging.getLogger("infra_lib").addHandler(_logging.NullHandler())
 
-from .models import Infrastructure, Machine, ExpectedSpecs, VMSpec, Disk, Deployment, Service
+from .models import Infrastructure, Unit, ShipItem, ExpectedSpecs, VMSpec, Disk, Deployment, Service
 from .core.domain import Domain, BYODomain, CloudflareDomain, build_domain
 from .pipeline import deploy, get, list_deployments, run, logs, connect, down
 from . import progress
@@ -41,7 +41,8 @@ __all__ = [
     "connect",
     "down",
     "Infrastructure",
-    "Machine",
+    "Unit",
+    "ShipItem",
     "ExpectedSpecs",
     "VMSpec",
     "Disk",

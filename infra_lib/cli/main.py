@@ -5,10 +5,10 @@ import sys
 
 from .. import progress
 from ..pipeline import deploy, list_deployments, destroy
-from ..models import Infrastructure, ExpectedSpecs, VMSpec
+from ..models import Infrastructure, ExpectedSpecs, VMSpec, ShipItem
 from ..core.domain import build_domain
 from ..providers import get_provider, provider_names
-from ..config import load_config
+from ..config import load_config, default_provider_for_type
 from .tui import prompt_vm_spec
 from .reporter import ConsoleReporter
 
@@ -79,62 +79,69 @@ def cmd_deploy(args):
     infra = _resolve_config(args)
     had_config = infra is not None
     infra = infra or Infrastructure()
-    machine = infra.machines[0]
+    unit = infra.units[0]
 
     if args.name != "default":
         infra.name = args.name
     if args.location != "CentralUS":
         infra.location = args.location
-    if args.provider != "azure":
+
+    # Type / provider. `image`/`build` imply a pod; `--type`/`--provider` override.
+    # Setting type (explicitly or implied) without a provider re-derives it.
+    unit_type = args.type or (("pod" if (args.image or args.build) else None))
+    if unit_type:
+        unit.type = unit_type
+    if args.provider:
         infra.provider = args.provider
+    elif unit_type:
+        infra.provider = default_provider_for_type(unit_type)
     provider = get_provider(infra.provider)
 
     if args.source:
         if not os.path.isdir(args.source):
             print(f"error: source must be a directory: {args.source}")
             sys.exit(1)
-        machine.ship.append(os.path.abspath(args.source))
+        unit.ship.append(ShipItem(src=os.path.abspath(args.source)))
 
-    # Sizing: --instance-type (exact) > --cpu/--ram (raw) > --gpu/--vm (preset) > config > prompt.
+    # Sizing: --instance-type (exact) > --cpu/--ram (raw) > --gpu/--size (preset) > config > prompt.
     gpu_count, gpu_type = _parse_gpu_arg(args.gpu) if args.gpu else (0, None)
     if args.instance_type:
-        machine.hardware = VMSpec(type=args.instance_type)
+        unit.hardware = VMSpec(type=args.instance_type)
     elif args.cpu or args.ram:
-        machine.hardware = ExpectedSpecs(cpu=args.cpu or 2, ram_gb=args.ram or 8)
-    elif args.vm:
-        machine.hardware = provider.preset_specs(args.vm)
+        unit.hardware = ExpectedSpecs(cpu=args.cpu or 2, ram_gb=args.ram or 8)
+    elif args.size:
+        unit.hardware = provider.preset_specs(args.size)
     elif (gpu_count or gpu_type) and not had_config:
-        machine.hardware = ExpectedSpecs()       # GPU box; the SKU bundles cpu/ram
-    elif not had_config:
+        unit.hardware = ExpectedSpecs()       # GPU box; the SKU bundles cpu/ram
+    elif not had_config and unit.type == "vm":
         hardware, prompted_storage = prompt_vm_spec(infra.location, provider)
-        machine.hardware = hardware
-        machine.disk.size_gb = prompted_storage
+        unit.hardware = hardware
+        unit.disk.size_gb = prompted_storage
     # GPU layers onto whatever ExpectedSpecs we ended up with (incl. from config).
-    if (gpu_count or gpu_type) and isinstance(machine.hardware, ExpectedSpecs):
-        machine.hardware.gpu = gpu_count or 1
-        machine.hardware.gpu_type = gpu_type
+    if (gpu_count or gpu_type) and isinstance(unit.hardware, ExpectedSpecs):
+        unit.hardware.gpu = gpu_count or 1
+        unit.hardware.gpu_type = gpu_type
     if args.storage:
-        machine.disk.size_gb = args.storage
+        unit.disk.size_gb = args.storage
 
     if args.install:
-        machine.setup.append(args.install)
+        unit.setup.append(args.install)
     if args.start:
-        machine.start = args.start
+        unit.start = args.start
     if args.port:
-        machine.ports = [args.port]
+        unit.ports = [args.port]
 
-    # Container workload (selects RunPod / container path).
     if args.image:
-        machine.image = args.image
+        unit.image = args.image
     if args.build:
-        machine.build = os.path.abspath(args.build)
+        unit.build = os.path.abspath(args.build)
     if args.registry:
-        machine.registry = args.registry
+        unit.registry = args.registry
 
     # Domain: CLI flags rebuild it; otherwise keep whatever config produced.
     if args.domain or args.domain_strategy:
         try:
-            machine.domain = build_domain(
+            unit.domain = build_domain(
                 name=args.domain,
                 strategy=args.domain_strategy,
                 proxied=args.proxied,
@@ -294,7 +301,11 @@ def main():
     p_deploy = subparsers.add_parser("deploy", help="Deploy a directory")
     p_deploy.add_argument("source", nargs="?", default=None, help="Path to the directory to deploy (optional)")
     p_deploy.add_argument("--name", default="default", help="Deployment name (default: default)")
-    p_deploy.add_argument("--provider", default="azure", choices=provider_names())
+    p_deploy.add_argument("--type", default=None, choices=["vm", "pod"],
+                          help="Unit type: vm (a box to fill) or pod (a container host). "
+                               "Defaults from config, or 'pod' when --image/--build is given.")
+    p_deploy.add_argument("--provider", default=None, choices=provider_names(),
+                          help="Cloud provider (default: derived from --type — vm->azure, pod->runpod)")
     p_deploy.add_argument("--location", default="CentralUS")
     p_deploy.add_argument("--ssh-key", default=None)
     p_deploy.add_argument("--domain", default=None)
@@ -304,11 +315,11 @@ def main():
     p_deploy.add_argument("--install", default=None, help="Shell command to run on the VM after deploy")
     p_deploy.add_argument("--start", default=None, help="Command to run as a supervised systemd service")
     p_deploy.add_argument("--port", type=int, default=None, help="App port to expose via reverse proxy")
-    p_deploy.add_argument("--vm", default=None, metavar="SIZE",
+    p_deploy.add_argument("--size", default=None, metavar="SIZE",
                           help=f"Size preset (azure: {', '.join(_DEFAULT_PRESETS)}; "
                                f"validated against the chosen provider)")
     p_deploy.add_argument("--image", default=None, metavar="REF",
-                          help="Container image to run, e.g. ghcr.io/me/app:latest (container workload)")
+                          help="Container image to boot, e.g. ghcr.io/me/app:latest (implies a pod)")
     p_deploy.add_argument("--build", default=None, metavar="DIR",
                           help="Build an image from DIR (must contain a Dockerfile) and push it")
     p_deploy.add_argument("--registry", default=None, metavar="REG",

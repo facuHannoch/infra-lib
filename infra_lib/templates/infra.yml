@@ -1,58 +1,60 @@
 name: {name}
-# provider: azure        # cloud to deploy to (default: azure)
+# type: vm               # vm (a box you fill) | pod (a container host like RunPod)
+# provider: azure        # derived from type (vm->azure, pod->runpod) unless set
 # location: CentralUS
 
-# --- One machine (flat form — the common case) ------------------------------
-# Everything below configures a single VM.
+# --- One unit (flat form — the common case) ---------------------------------
+# Everything below configures a single unit. The deploy runs the same steps for
+# every unit (create -> ship -> setup -> start -> expose -> health); steps that
+# don't apply to the unit's type simply don't run.
 
-# VM size — pick ONE way:
-vm: small               # preset: micro, small, medium, large
+# Size — pick ONE way:
+size: small             # preset: micro, small, medium, large
 # cpu: 4                # ...or minimum specs (resolved to the cheapest matching size)
 # ram: 16
 # instance_type: Standard_D2s_v3   # ...or an exact provider size (skips resolution)
 
-# gpu: a100             # request a GPU box — by type (t4, a10, a100) or count (gpu: 2).
-#                       # The NVIDIA driver is installed automatically. GPU families
-#                       # need quota: https://portal.azure.com (Quotas blade).
+# gpu: a100             # request a GPU. vm (Azure): t4, a10, a100 (driver auto-installed;
+#                       #   GPU families need quota). pod (RunPod): a40, l40s, a100, h100.
 
-# storage: 30      # disk size in GB (default 30)
-# port: 3000       # expose app port via reverse proxy (alias for `ports: [3000]`)
+# storage: 30      # disk / volume size in GB (default 30)
+# port: 3000       # expose an app port (alias for `ports: [3000]`)
 
-# ship:
-#   - .            # directories to rsync to the VM
-#   - ../my-lib
+# env:             # environment variables (systemd Environment= on a vm, pod env)
+#   MODEL: llama3  # secrets go here too
 
-# setup:           # run once, must exit (install / build)
+# --- vm unit: ship files, run commands, supervise a process -----------------
+# ship:            # directories to rsync. `SRC` or `SRC:DEST` (DEST: absolute or ~-relative).
+#   - .
+#   - ../my-lib:/srv/lib/my-lib
+
+# setup:           # run once, must exit (install / build). Runs wherever SSH is available.
 #   - sudo apt install -y unzip
 #   - curl -fsSL https://bun.sh/install | bash
-#   - cd /srv/files/my-lib && ~/.bun/bin/bun install
 
-# start:           # long-running server, supervised by systemd (restarts on crash, survives reboot)
-#   cd /srv/files/myapp && ~/.bun/bin/agents start-hub
+# start: cd /srv/files/myapp && ~/.bun/bin/agents start-hub   # vm: systemd service
 
 # domain: myapp.example.com
 # domain_strategy: own   # own or cloudflare
 
-# --- Container workload (instead of ship/setup/start) -----------------------
-# Run a container image rather than files-on-a-VM. Required by container hosts
-# like RunPod (provider: runpod); also the way to run GPUs there.
+# --- pod unit: boot a container image (RunPod) ------------------------------
+# A pod boots from an image — set `type: pod` and one of image/build.
 #
-# provider: runpod
-# gpu: a40                       # RunPod GPU: a40, rtxa6000, l40s, l40, a100, h100
-# image: ghcr.io/me/myapp:latest # ...prebuilt image (bring-your-image), OR:
-# build: .                       # ...build the Dockerfile in this dir and push
-# registry: ghcr.io/me           #    where `build` pushes (needs `docker login`)
-# env:
-#   MODEL: llama3
-# start: python serve.py         # optional command override (container CMD)
+# type: pod
+# gpu: a40
+# image: ghcr.io/me/myapp:latest   # ...prebuilt image (bring-your-image), OR:
+# build: .                         # ...build the Dockerfile in this dir and push
+# registry: ghcr.io/me             #    where `build` pushes (needs `docker login`)
+# start: python serve.py           # optional command override (container CMD)
+# ship / setup also work on a pod when its image runs sshd (best-effort).
 
-# --- Several machines (nested form) -----------------------------------------
-# Instead of the flat fields above, list machines by name. Each takes the same
-# per-machine keys (vm/cpu/ram, storage, ports, ship, setup, start, domain).
+# --- Several units (nested form) --------------------------------------------
+# Instead of the flat fields above, list units by name. Each takes the same
+# per-unit keys.
 #
-# machines:
+# units:
 #   web:
-#     vm: small
+#     size: small
 #     ports: [3000]
 #     ship: [.]
 #     domain: myapp.example.com
