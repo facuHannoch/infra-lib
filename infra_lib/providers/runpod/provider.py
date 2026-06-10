@@ -20,6 +20,7 @@ class RunPodProvider(Provider):
     size_term = _sizes.SIZE_TERM
     presets = _sizes.RUNPOD_PRESETS
     unit_type = "pod"
+    gpu_first = True
 
     # --- sizing ----------------------------------------------------------------
     def preset_specs(self, label: str) -> ExpectedSpecs:

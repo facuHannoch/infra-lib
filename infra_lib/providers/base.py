@@ -28,6 +28,7 @@ class Provider(ABC):
     size_term: str = "size"     # human term for an exact instance id (UI labels)
     presets: dict = {}          # {label: {"cpu", "ram_gb", "price", ...}}
     unit_type: str = "vm"       # the unit `type` this provider realizes: "vm" | "pod"
+    gpu_first: bool = False      # sizing is GPU-first (presets are GPUs; no cpu/ram custom)
 
     # --- sizing ----------------------------------------------------------------
     @abstractmethod

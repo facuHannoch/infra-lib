@@ -9,7 +9,7 @@ from ..models import Infrastructure, ExpectedSpecs, VMSpec, ShipItem
 from ..core.domain import build_domain
 from ..providers import get_provider, provider_names
 from ..config import load_config, default_provider_for_type
-from .tui import prompt_vm_spec
+from .tui import prompt_unit
 from .reporter import ConsoleReporter
 
 # Presets of the default provider, used for --vm help/choices at parse time.
@@ -75,16 +75,56 @@ def _parse_gpu_arg(s: str):
     return 1, s.lower()
 
 
-def cmd_deploy(args):
-    infra = _resolve_config(args)
-    had_config = infra is not None
-    infra = infra or Infrastructure()
-    unit = infra.units[0]
+def _has_unit_flags(args) -> bool:
+    """Whether the user specified the unit on the CLI (so we skip the TUI)."""
+    return any([args.type, args.provider, args.size, args.cpu, args.ram,
+                args.instance_type, args.gpu, args.image, args.build])
 
+
+def _apply_overlays(args, infra):
+    """Apply flags that layer onto any unit, from either the TUI or config path."""
+    unit = infra.units[0]
     if args.name != "default":
         infra.name = args.name
     if args.location != "CentralUS":
         infra.location = args.location
+    if args.storage:
+        unit.disk.size_gb = args.storage
+    if args.install:
+        unit.setup.append(args.install)
+    if args.start:
+        unit.start = args.start
+    if args.port:
+        unit.ports = [args.port]
+    if args.domain or args.domain_strategy:
+        try:
+            unit.domain = build_domain(
+                name=args.domain, strategy=args.domain_strategy,
+                proxied=args.proxied, cloudflare_token=args.cloudflare_token,
+            )
+        except ValueError as e:
+            print(f"error: {e}")
+            sys.exit(1)
+
+
+def cmd_deploy(args):
+    infra = _resolve_config(args)
+    had_config = infra is not None
+
+    # No config and no unit-defining flags: drive the interactive builder
+    # (provider -> type -> size -> port -> type-specific). Falls through to the
+    # default path when there's no tty / questionary.
+    if not had_config and not _has_unit_flags(args):
+        picked = prompt_unit(args.location, args.source)
+        if picked is not None:
+            provider_name, unit = picked
+            infra = Infrastructure(location=args.location, provider=provider_name, units=[unit])
+            _apply_overlays(args, infra)
+            deploy(infra, ssh_key_path=args.ssh_key)
+            return
+
+    infra = infra or Infrastructure()
+    unit = infra.units[0]
 
     # Type / provider. `image`/`build` imply a pod; `--type`/`--provider` override.
     # Setting type (explicitly or implied) without a provider re-derives it.
@@ -103,7 +143,7 @@ def cmd_deploy(args):
             sys.exit(1)
         unit.ship.append(ShipItem(src=os.path.abspath(args.source)))
 
-    # Sizing: --instance-type (exact) > --cpu/--ram (raw) > --gpu/--size (preset) > config > prompt.
+    # Sizing: --instance-type (exact) > --cpu/--ram (raw) > --gpu/--size (preset) > config.
     gpu_count, gpu_type = _parse_gpu_arg(args.gpu) if args.gpu else (0, None)
     if args.instance_type:
         unit.hardware = VMSpec(type=args.instance_type)
@@ -113,23 +153,10 @@ def cmd_deploy(args):
         unit.hardware = provider.preset_specs(args.size)
     elif (gpu_count or gpu_type) and not had_config:
         unit.hardware = ExpectedSpecs()       # GPU box; the SKU bundles cpu/ram
-    elif not had_config and unit.type == "vm":
-        hardware, prompted_storage = prompt_vm_spec(infra.location, provider)
-        unit.hardware = hardware
-        unit.disk.size_gb = prompted_storage
     # GPU layers onto whatever ExpectedSpecs we ended up with (incl. from config).
     if (gpu_count or gpu_type) and isinstance(unit.hardware, ExpectedSpecs):
         unit.hardware.gpu = gpu_count or 1
         unit.hardware.gpu_type = gpu_type
-    if args.storage:
-        unit.disk.size_gb = args.storage
-
-    if args.install:
-        unit.setup.append(args.install)
-    if args.start:
-        unit.start = args.start
-    if args.port:
-        unit.ports = [args.port]
 
     if args.image:
         unit.image = args.image
@@ -138,19 +165,7 @@ def cmd_deploy(args):
     if args.registry:
         unit.registry = args.registry
 
-    # Domain: CLI flags rebuild it; otherwise keep whatever config produced.
-    if args.domain or args.domain_strategy:
-        try:
-            unit.domain = build_domain(
-                name=args.domain,
-                strategy=args.domain_strategy,
-                proxied=args.proxied,
-                cloudflare_token=args.cloudflare_token,
-            )
-        except ValueError as e:
-            print(f"error: {e}")
-            sys.exit(1)
-
+    _apply_overlays(args, infra)
     deploy(infra, ssh_key_path=args.ssh_key)
 
 
