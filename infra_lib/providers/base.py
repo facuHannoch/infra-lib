@@ -32,9 +32,11 @@ class Provider(ABC):
         available VMSpec. Idempotent on an already-resolved VMSpec."""
 
     @abstractmethod
-    def list_sizes(self, location: str, min_cpu: int = 0, min_ram_gb: float = 0) -> list[dict]:
-        """Available sizes as [{name, cpu, ram_gb, price}], cheapest first.
-        Used by the `sizes` command; `resolve` is the path used by deploy."""
+    def list_sizes(self, location: str, min_cpu: int = 0, min_ram_gb: float = 0,
+                   gpu: int = 0, gpu_type: str = None) -> list[dict]:
+        """Available sizes as [{name, cpu, ram_gb, gpus, price}], cheapest first.
+        `gpu`/`gpu_type` filter to GPU sizes. Used by the `sizes` command;
+        `resolve` is the path used by deploy."""
 
     # --- provisioning ----------------------------------------------------------
     @abstractmethod
@@ -49,6 +51,17 @@ class Provider(ABC):
     @abstractmethod
     def list_deployments(self) -> list[dict]:
         """All deployments as [{name, ip, url, ssh_key}]."""
+
+    # --- power (optional) ------------------------------------------------------
+    # Stop/resume a deployment without destroying it. Optional: providers that
+    # can't do this leave the defaults, which report it isn't supported.
+    def pause(self, name: str) -> None:
+        """Stop compute billing while keeping the disk (resume later)."""
+        raise NotImplementedError(f"The {self.name} provider doesn't support pause.")
+
+    def resume(self, name: str) -> None:
+        """Start a previously paused deployment back up."""
+        raise NotImplementedError(f"The {self.name} provider doesn't support resume.")
 
     # --- auth ------------------------------------------------------------------
     @abstractmethod

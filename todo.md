@@ -1,3 +1,5 @@
+- [ ] currently all copied directories go to `/srv/files`. Allow to put them in a specific location, maybe with a port-like sintax, like `root/dir:absolute/path/to/dir. Note that the first (what to copy) is relative, but the second (destination, where to copy) is absolute
+
 # infra-lib — pending work
 
 This file is the backlog. Each item is written to be actionable by someone (or an

@@ -11,10 +11,35 @@ CONFIG_FILENAME = "infra.yml"
 # Keys that configure a single machine. When they appear at the top level, the
 # file is the flat (one-machine) form; under `machines:` they're per-machine.
 _MACHINE_KEYS = {
-    "vm", "cpu", "ram", "instance_type", "storage", "disk_type",
+    "vm", "cpu", "ram", "gpu", "instance_type", "storage", "disk_type",
     "ship", "setup", "start", "port", "ports",
     "domain", "domain_strategy", "proxied", "cloudflare_token",
 }
+
+
+def parse_gpu(val) -> tuple[int, Optional[str]]:
+    """Normalize a `gpu:` value into (count, type). Accepts several shapes::
+
+        gpu: a100            -> (1, "a100")     # by type name
+        gpu: 2               -> (2, None)       # by count, any type
+        gpu: true            -> (1, None)       # just "give me a GPU"
+        gpu: {type: t4, count: 4}  -> (4, "t4")
+
+    Returns (0, None) when no GPU is requested.
+    """
+    if val is None or val is False:
+        return 0, None
+    if val is True:
+        return 1, None
+    if isinstance(val, int):
+        return val, None
+    if isinstance(val, str):
+        return 1, val.lower()
+    if isinstance(val, dict):
+        count = int(val.get("count", 1))
+        gtype = str(val["type"]).lower() if val.get("type") else None
+        return count, gtype
+    raise ValueError("'gpu' must be a count, a type name, or a {type, count} mapping.")
 
 
 def load_config(path: str = None) -> Optional[Infrastructure]:
@@ -103,13 +128,21 @@ def _parse_machine(data: dict, base: str, provider: str, name: str = None) -> Ma
         cloudflare_token=data.get("cloudflare_token") or os.environ.get("CLOUDFLARE_API_TOKEN"),
     )
 
-    # Sizing: instance_type (exact) > cpu/ram (raw) > vm (preset) > default small.
+    # Sizing: instance_type (exact) > cpu/ram (raw) > gpu/vm (preset) > default small.
+    # GPU is orthogonal: it layers onto an ExpectedSpecs (and a GPU box doesn't
+    # force a CPU preset, since the SKU bundles its own cpu/ram).
+    gpu_count, gpu_type = parse_gpu(data.get("gpu"))
     if data.get("instance_type"):
         hardware = VMSpec(type=str(data["instance_type"]))
     elif data.get("cpu") or data.get("ram"):
         hardware = ExpectedSpecs(cpu=int(data.get("cpu", 2)), ram_gb=float(data.get("ram", 8)))
+    elif gpu_count or gpu_type:
+        hardware = ExpectedSpecs()
     else:
         hardware = get_provider(provider).preset_specs(str(data.get("vm", "small")))
+    if (gpu_count or gpu_type) and isinstance(hardware, ExpectedSpecs):
+        hardware.gpu = gpu_count or 1
+        hardware.gpu_type = gpu_type
 
     raw_storage = data.get("storage")
     return Machine(

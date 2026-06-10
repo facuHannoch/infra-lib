@@ -28,6 +28,19 @@ AZURE_PRESETS = {
 
 _FALLBACK_PRICES = {v["sku"]: v["price"] for v in AZURE_PRESETS.values()}
 
+# Friendly GPU name -> the token Azure puts in the SKU name. Matched delimited
+# (f"_{token}_") so "a10" doesn't also match A100 SKUs. None gpu_type = any GPU.
+GPU_TOKENS = {
+    "t4":   "T4",
+    "a10":  "A10",
+    "a100": "A100",
+    "h100": "H100",
+}
+
+
+def _gpu_token(gpu_type: str) -> str:
+    return f"_{GPU_TOKENS.get(gpu_type.lower(), gpu_type.upper())}_"
+
 
 def expectedspecs_from_preset(label: str) -> ExpectedSpecs:
     """Turn a preset label ('small') into the cpu/ram minimums it implies."""
@@ -95,7 +108,7 @@ def _azure_list_sizes(location: str) -> dict:
 def _preset_specs() -> list[dict]:
     """Built-in size specs used when the Azure SKU API is unavailable."""
     return [
-        {"name": p["sku"], "cpu": p["cpu"], "ram_gb": float(p["ram_gb"])}
+        {"name": p["sku"], "cpu": p["cpu"], "ram_gb": float(p["ram_gb"]), "gpus": 0}
         for p in AZURE_PRESETS.values()
     ]
 
@@ -125,8 +138,9 @@ def _azure_size_specs(location: str, credential) -> list[dict]:
                 continue
             cpu = int(caps.get("vCPUs", 0))
             ram_gb = float(caps.get("MemoryGB", 0))
+            gpus = int(caps.get("GPUs", 0))
             if cpu and ram_gb:
-                result.append({"name": sku.name, "cpu": cpu, "ram_gb": ram_gb})
+                result.append({"name": sku.name, "cpu": cpu, "ram_gb": ram_gb, "gpus": gpus})
         return result
     except Exception as e:
         log.debug("Azure SKU API request failed: %s", e, exc_info=True)
@@ -167,14 +181,22 @@ def resolve(request, location: str) -> VMSpec:
                 raise RuntimeError(f"{request.type} isn't available in {location}.")
             best = match
         else:
+            want_gpu = request.gpu or request.gpu_type
             candidates = [
                 s for s in specs
                 if s["cpu"] >= request.cpu and s["ram_gb"] >= request.ram_gb and s["name"] in prices
             ]
+            if want_gpu:
+                need = max(request.gpu, 1)
+                candidates = [s for s in candidates if s.get("gpus", 0) >= need]
+                if request.gpu_type:
+                    token = _gpu_token(request.gpu_type)
+                    candidates = [s for s in candidates if token in s["name"]]
+            else:
+                # A non-GPU request should never land on (pricey) GPU hardware.
+                candidates = [s for s in candidates if not s.get("gpus", 0)]
             if not candidates:
-                raise RuntimeError(
-                    f"No size in {location} matches {request.cpu} vCPU / {request.ram_gb}GB RAM."
-                )
+                raise RuntimeError(_no_match_message(request, location))
             candidates.sort(key=lambda s: (prices.get(s["name"], 9999), s["cpu"], s["ram_gb"]))
             best = candidates[0]
 
@@ -182,5 +204,17 @@ def resolve(request, location: str) -> VMSpec:
         type=best["name"],
         cpu=best["cpu"],
         ram_gb=best["ram_gb"],
+        gpus=best.get("gpus", 0),
         price_per_hour=prices.get(best["name"]),
     )
+
+
+def _no_match_message(request, location: str) -> str:
+    if request.gpu or request.gpu_type:
+        what = f"{request.gpu or 1}x {request.gpu_type or 'GPU'}"
+        return (
+            f"No GPU size in {location} matches {what}. The family may be "
+            f"restricted here or you may have no quota for it — try another region "
+            f"or request quota: https://portal.azure.com/#view/Microsoft.Azure.Capacity/QuotaMenuBlade/~/myQuotas"
+        )
+    return f"No size in {location} matches {request.cpu} vCPU / {request.ram_gb}GB RAM."

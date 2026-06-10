@@ -35,15 +35,22 @@ class AzureProvider(Provider):
             client_secret=os.environ["ARM_CLIENT_SECRET"],
         )
 
-    def list_sizes(self, location: str, min_cpu: int = 0, min_ram_gb: float = 0) -> list[dict]:
+    def list_sizes(self, location: str, min_cpu: int = 0, min_ram_gb: float = 0,
+                   gpu: int = 0, gpu_type: str = None) -> list[dict]:
         self.load_credentials()
         specs = _sizes._azure_size_specs(location, self._credential())
         prices = _sizes._azure_list_sizes(location)
-        out = [
-            {"name": s["name"], "cpu": s["cpu"], "ram_gb": s["ram_gb"], "price": prices[s["name"]]}
-            for s in specs
-            if s["cpu"] >= min_cpu and s["ram_gb"] >= min_ram_gb and s["name"] in prices
-        ]
+        token = _sizes._gpu_token(gpu_type) if gpu_type else None
+        out = []
+        for s in specs:
+            if s["cpu"] < min_cpu or s["ram_gb"] < min_ram_gb or s["name"] not in prices:
+                continue
+            if (gpu or gpu_type) and s.get("gpus", 0) < max(gpu, 1):
+                continue
+            if token and token not in s["name"]:
+                continue
+            out.append({"name": s["name"], "cpu": s["cpu"], "ram_gb": s["ram_gb"],
+                        "gpus": s.get("gpus", 0), "price": prices[s["name"]]})
         out.sort(key=lambda s: s["price"])
         return out
 
@@ -62,6 +69,14 @@ class AzureProvider(Provider):
     def list_deployments(self) -> list[dict]:
         from . import provision as _provision
         return _provision.list_deployments()
+
+    def pause(self, name: str) -> None:
+        from . import provision as _provision
+        _provision.pause(name)
+
+    def resume(self, name: str) -> None:
+        from . import provision as _provision
+        _provision.resume(name)
 
     def load_credentials(self) -> None:
         _auth.load_azure_credentials()

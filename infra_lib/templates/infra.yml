@@ -11,6 +11,10 @@ vm: small               # preset: micro, small, medium, large
 # ram: 16
 # instance_type: Standard_D2s_v3   # ...or an exact provider size (skips resolution)
 
+# gpu: a100             # request a GPU box — by type (t4, a10, a100) or count (gpu: 2).
+#                       # The NVIDIA driver is installed automatically. GPU families
+#                       # need quota: https://portal.azure.com (Quotas blade).
+
 # storage: 30      # disk size in GB (default 30)
 # port: 3000       # expose app port via reverse proxy (alias for `ports: [3000]`)
 

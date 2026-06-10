@@ -10,13 +10,19 @@ if TYPE_CHECKING:
 
 @dataclass
 class ExpectedSpecs:
-    """What you ask for: minimum cpu/ram. Transient, provider-agnostic.
+    """What you ask for: minimum cpu/ram (+ optional GPU). Transient, provider-agnostic.
 
     Resolved into a concrete VMSpec by the provider (see resolve()). Never stored
     on a Machine — it's only an input that produces a VMSpec.
+
+    GPU is an orthogonal axis: a GPU SKU bundles its own cpu/ram, so when `gpu`
+    is requested the cpu/ram fields act as additional minimums (usually moot).
+    `gpu_type` is a friendly name ("t4", "a10", "a100"); None means any GPU.
     """
     cpu: int = 2
     ram_gb: float = 8
+    gpu: int = 0
+    gpu_type: Optional[str] = None
 
 
 @dataclass
@@ -31,11 +37,13 @@ class VMSpec:
     type: str
     cpu: int = 0
     ram_gb: float = 0
+    gpus: int = 0
     price_per_hour: Optional[float] = None
 
     def __str__(self):
         price = f"~${self.price_per_hour:.4f}/hr" if self.price_per_hour else "price unknown"
-        return f"{self.type} ({self.cpu} vCPU, {self.ram_gb}GB RAM, {price})"
+        gpu = f", {self.gpus}x GPU" if self.gpus else ""
+        return f"{self.type} ({self.cpu} vCPU, {self.ram_gb}GB RAM{gpu}, {price})"
 
 
 @dataclass

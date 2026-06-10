@@ -1,0 +1,22 @@
+defaults:
+  runtime: host
+  workspace: worktree
+  attacher: tmux
+  adapter: claude
+  toolchain: nodepy
+server:
+  port: 3409
+  public_allow_cidrs:
+    - 100.64.0.0/10
+task_policy:
+  on_completion: retired
+  runtime: host
+  workspace: worktree
+agents:
+  atlas:
+    workspace: self
+    adapter: codex
+    runtime: docker
+    idle_timeout_ms: 50000
+    telegram_channel:
+      bot_token: "$TELEGRAM_TOKEN"

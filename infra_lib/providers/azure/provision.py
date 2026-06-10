@@ -9,7 +9,8 @@ from ... import progress
 _DEFAULT_SSH_KEY = os.path.expanduser("~/.infra-lib/keys/default_id_rsa")
 
 
-def _make_infrastructure(ssh_key_path: str, vm_size: str = "Standard_D2s_v3", storage_gb: int = 30):
+def _make_infrastructure(ssh_key_path: str, vm_size: str = "Standard_D2s_v3", storage_gb: int = 30,
+                         gpu: bool = False):
     def _infrastructure():
         with open(f"{ssh_key_path}.pub") as f:
             ssh_public_key = f.read().strip()
@@ -105,7 +106,7 @@ systemctl start caddy
 
         cloud_init = public_ip.ip_address.apply(make_cloud_init)
 
-        compute.VirtualMachine(
+        vm = compute.VirtualMachine(
             "vm",
             resource_group_name=rg.name,
             hardware_profile={"vm_size": vm_size},
@@ -142,8 +143,26 @@ systemctl start caddy
             network_profile={"network_interfaces": [{"id": nic.id, "primary": True}]},
         )
 
+        # GPU boxes are bare without a driver. Azure's NVIDIA GPU Driver extension
+        # installs CUDA post-boot, so the user's setup/start steps find a working
+        # GPU. Only attached when the SKU actually has a GPU.
+        if gpu:
+            compute.VirtualMachineExtension(
+                "gpu-driver",
+                resource_group_name=rg.name,
+                vm_name=vm.name,
+                publisher="Microsoft.HpcCompute",
+                type="NvidiaGpuDriverLinux",
+                type_handler_version="1.6",
+                auto_upgrade_minor_version=True,
+                settings={},
+            )
+
         pulumi.export("public_ip", public_ip.ip_address)
         pulumi.export("url", public_ip.ip_address.apply(lambda ip: f"http://{ip}"))
+        # Recorded so pause/resume (deallocate/start) can find the VM later.
+        pulumi.export("resource_group", rg.name)
+        pulumi.export("vm_name", vm.name)
 
     return _infrastructure
 
@@ -163,6 +182,56 @@ def destroy(name: str, purge: bool = True):
         stack.destroy(on_output=progress.raw)
     if purge:
         stack.workspace.remove_stack(name)
+
+
+def _stack_outputs(name: str) -> dict:
+    stack = auto.select_stack(
+        stack_name=name,
+        project_name="infra-lib",
+        program=lambda: None,
+        opts=auto.LocalWorkspaceOptions(env_vars={"PULUMI_CONFIG_PASSPHRASE": ""}),
+    )
+    return {k: v.value for k, v in stack.outputs().items()}
+
+
+def _power_action(name: str, begin_method: str, start_msg: str, done_msg: str):
+    """Deallocate or start the VM behind a deployment via the compute SDK.
+
+    Power operations aren't a Pulumi concern, so we read the RG/VM names the
+    stack exported and drive them with the management client directly.
+    """
+    from .auth import load_azure_credentials
+    from azure.identity import ClientSecretCredential
+    from azure.mgmt.compute import ComputeManagementClient
+
+    load_azure_credentials()
+    outputs = _stack_outputs(name)
+    rg, vm = outputs.get("resource_group"), outputs.get("vm_name")
+    if not rg or not vm:
+        raise RuntimeError(
+            f"Deployment '{name}' didn't record its VM (created before pause/resume "
+            f"existed). Redeploy to enable it."
+        )
+    credential = ClientSecretCredential(
+        tenant_id=os.environ["ARM_TENANT_ID"],
+        client_id=os.environ["ARM_CLIENT_ID"],
+        client_secret=os.environ["ARM_CLIENT_SECRET"],
+    )
+    client = ComputeManagementClient(credential, os.environ["ARM_SUBSCRIPTION_ID"])
+    progress.step(start_msg)
+    getattr(client.virtual_machines, begin_method)(rg, vm).result()
+    progress.done(done_msg)
+
+
+def pause(name: str):
+    """Deallocate the VM: stop compute billing, keep the disk (resume later)."""
+    _power_action(name, "begin_deallocate",
+                  f"Pausing {name} (deallocating)", f"{name} paused — compute billing stopped")
+
+
+def resume(name: str):
+    """Start a paused (deallocated) VM back up."""
+    _power_action(name, "begin_start", f"Resuming {name}", f"{name} resumed")
 
 
 def list_deployments() -> list:
@@ -206,7 +275,8 @@ def provision(name: str = "default", location: str = "CentralUS", ssh_key_path: 
     stack = auto.create_or_select_stack(
         stack_name=name,
         project_name="infra-lib",
-        program=_make_infrastructure(ssh_key_path, vm_spec.type, storage_gb),
+        program=_make_infrastructure(ssh_key_path, vm_spec.type, storage_gb,
+                                     gpu=bool(getattr(vm_spec, "gpus", 0))),
         opts=auto.LocalWorkspaceOptions(env_vars={"PULUMI_CONFIG_PASSPHRASE": ""}),
     )
     stack.set_config("azure-native:location", auto.ConfigValue(location))
@@ -218,5 +288,20 @@ def provision(name: str = "default", location: str = "CentralUS", ssh_key_path: 
     except ConcurrentUpdateError:
         stack.cancel()
         result = stack.up(on_output=progress.raw)
+    except Exception as e:
+        raise _friendlier(e, vm_spec, location)
     progress.done("Infrastructure ready")
     return {k: v.value for k, v in result.outputs.items()}
+
+
+def _friendlier(error: Exception, vm_spec, location: str) -> Exception:
+    """Turn an opaque quota failure into actionable guidance, else pass through."""
+    msg = str(error)
+    if "quota" in msg.lower() or "QuotaExceeded" in msg:
+        return RuntimeError(
+            f"Azure rejected {vm_spec.type} in {location} for lack of quota. "
+            f"GPU families start at 0 vCPUs and need a quota-increase request "
+            f"(per family, per region): "
+            f"https://portal.azure.com/#view/Microsoft.Azure.Capacity/QuotaMenuBlade/~/myQuotas"
+        )
+    return error

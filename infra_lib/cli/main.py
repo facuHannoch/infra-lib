@@ -67,6 +67,14 @@ def _resolve_config(args):
         sys.exit(1)
 
 
+def _parse_gpu_arg(s: str):
+    """--gpu accepts a count ('2') or a type name ('a100'). Returns (count, type)."""
+    s = s.strip()
+    if s.isdigit():
+        return int(s), None
+    return 1, s.lower()
+
+
 def cmd_deploy(args):
     infra = _resolve_config(args)
     had_config = infra is not None
@@ -87,17 +95,24 @@ def cmd_deploy(args):
             sys.exit(1)
         machine.ship.append(os.path.abspath(args.source))
 
-    # Sizing: --instance-type (exact) > --cpu/--ram (raw) > --vm (preset) > config > prompt.
+    # Sizing: --instance-type (exact) > --cpu/--ram (raw) > --gpu/--vm (preset) > config > prompt.
+    gpu_count, gpu_type = _parse_gpu_arg(args.gpu) if args.gpu else (0, None)
     if args.instance_type:
         machine.hardware = VMSpec(type=args.instance_type)
     elif args.cpu or args.ram:
         machine.hardware = ExpectedSpecs(cpu=args.cpu or 2, ram_gb=args.ram or 8)
     elif args.vm:
         machine.hardware = provider.preset_specs(args.vm)
+    elif (gpu_count or gpu_type) and not had_config:
+        machine.hardware = ExpectedSpecs()       # GPU box; the SKU bundles cpu/ram
     elif not had_config:
         hardware, prompted_storage = prompt_vm_spec(infra.location, provider)
         machine.hardware = hardware
         machine.disk.size_gb = prompted_storage
+    # GPU layers onto whatever ExpectedSpecs we ended up with (incl. from config).
+    if (gpu_count or gpu_type) and isinstance(machine.hardware, ExpectedSpecs):
+        machine.hardware.gpu = gpu_count or 1
+        machine.hardware.gpu_type = gpu_type
     if args.storage:
         machine.disk.size_gb = args.storage
 
@@ -126,13 +141,16 @@ def cmd_deploy(args):
 
 def cmd_sizes(args):
     try:
+        gpu_count, gpu_type = _parse_gpu_arg(args.gpu) if args.gpu else (0, None)
         sizes = get_provider(args.provider).list_sizes(
-            args.location, min_cpu=args.cpu, min_ram_gb=args.ram
+            args.location, min_cpu=args.cpu, min_ram_gb=args.ram,
+            gpu=gpu_count, gpu_type=gpu_type,
         )
-        print(f"{'NAME':<30} {'CPU':>4} {'RAM GB':>8} {'$/HR':>8}")
-        print("-" * 55)
+        print(f"{'NAME':<30} {'CPU':>4} {'RAM GB':>8} {'GPU':>4} {'$/HR':>8}")
+        print("-" * 60)
         for s in sizes[:20]:
-            print(f"{s['name']:<30} {s['cpu']:>4} {s['ram_gb']:>8.1f} {s['price']:>8.4f}")
+            print(f"{s['name']:<30} {s['cpu']:>4} {s['ram_gb']:>8.1f} "
+                  f"{s.get('gpus', 0):>4} {s['price']:>8.4f}")
     except Exception as e:
         print(f"error: {e}")
         sys.exit(1)
@@ -170,6 +188,24 @@ def cmd_down(args):
         except Exception as e:
             print(f"error: {e}")
             sys.exit(1)
+
+
+def cmd_pause(args):
+    from ..pipeline import pause
+    try:
+        pause(args.name)
+    except Exception as e:
+        print(f"error: {e}")
+        sys.exit(1)
+
+
+def cmd_resume(args):
+    from ..pipeline import resume
+    try:
+        resume(args.name)
+    except Exception as e:
+        print(f"error: {e}")
+        sys.exit(1)
 
 
 def cmd_connect(args):
@@ -263,6 +299,9 @@ def main():
                           help="Exact instance type, e.g. Standard_D2s_v3 (skips size resolution)")
     p_deploy.add_argument("--cpu", type=int, default=None, help="Minimum vCPUs (resolved to a size)")
     p_deploy.add_argument("--ram", type=float, default=None, help="Minimum RAM in GB (resolved to a size)")
+    p_deploy.add_argument("--gpu", default=None, metavar="N|TYPE",
+                          help="Request a GPU box: a count (2) or a type (t4, a10, a100). "
+                               "Installs the NVIDIA driver automatically.")
     p_deploy.add_argument("--storage", type=int, default=None, metavar="GB",
                           help="Disk size in GB (default 30)")
     p_deploy.add_argument("--config", nargs="?", const="", default=None, metavar="FILE",
@@ -276,6 +315,8 @@ def main():
     p_sizes.add_argument("--location", default="CentralUS")
     p_sizes.add_argument("--cpu", type=int, default=1)
     p_sizes.add_argument("--ram", type=float, default=1)
+    p_sizes.add_argument("--gpu", default=None, metavar="N|TYPE",
+                         help="Only GPU sizes: a count (2) or a type (t4, a10, a100)")
 
     # auth
     p_auth = subparsers.add_parser(
@@ -295,6 +336,13 @@ def main():
     p_down = subparsers.add_parser("down", help="Destroy a deployment")
     p_down.add_argument("names", nargs="+", metavar="NAME", help="Deployment name(s) to destroy")
     p_down.add_argument("--keep-history", action="store_true", help="Keep Pulumi stack history and config")
+
+    # pause / resume
+    p_pause = subparsers.add_parser(
+        "pause", help="Stop a deployment's VM (deallocate) — keeps the disk, halts compute billing")
+    p_pause.add_argument("name", help="Deployment name")
+    p_resume = subparsers.add_parser("resume", help="Start a paused deployment back up")
+    p_resume.add_argument("name", help="Deployment name")
 
     # connect
     p_connect = subparsers.add_parser("connect", help="SSH into a deployment")
@@ -323,6 +371,10 @@ def main():
         cmd_deploy(args)
     elif args.command == "down":
         cmd_down(args)
+    elif args.command == "pause":
+        cmd_pause(args)
+    elif args.command == "resume":
+        cmd_resume(args)
     elif args.command == "connect":
         cmd_connect(args)
     elif args.command == "logs":

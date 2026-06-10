@@ -151,3 +151,13 @@ def destroy(name: str, purge: bool = True) -> None:
 
 def down(name: str) -> None:
     destroy(name, purge=True)
+
+
+def pause(name: str) -> None:
+    """Deallocate the deployment's VM — stops compute billing, keeps the disk."""
+    _management_provider().pause(name)
+
+
+def resume(name: str) -> None:
+    """Start a paused deployment back up."""
+    _management_provider().resume(name)
