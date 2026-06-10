@@ -6,7 +6,10 @@ reach a cloud. Provider modules are imported lazily so that importing infra_lib
 """
 from .base import Provider
 
-_BUILTIN = {"azure": ("infra_lib.providers.azure.provider", "AzureProvider")}
+_BUILTIN = {
+    "azure": ("infra_lib.providers.azure.provider", "AzureProvider"),
+    "runpod": ("infra_lib.providers.runpod.provider", "RunPodProvider"),
+}
 _cache: dict[str, Provider] = {}
 
 

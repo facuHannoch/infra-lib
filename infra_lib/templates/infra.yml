@@ -33,6 +33,19 @@ vm: small               # preset: micro, small, medium, large
 # domain: myapp.example.com
 # domain_strategy: own   # own or cloudflare
 
+# --- Container workload (instead of ship/setup/start) -----------------------
+# Run a container image rather than files-on-a-VM. Required by container hosts
+# like RunPod (provider: runpod); also the way to run GPUs there.
+#
+# provider: runpod
+# gpu: a40                       # RunPod GPU: a40, rtxa6000, l40s, l40, a100, h100
+# image: ghcr.io/me/myapp:latest # ...prebuilt image (bring-your-image), OR:
+# build: .                       # ...build the Dockerfile in this dir and push
+# registry: ghcr.io/me           #    where `build` pushes (needs `docker login`)
+# env:
+#   MODEL: llama3
+# start: python serve.py         # optional command override (container CMD)
+
 # --- Several machines (nested form) -----------------------------------------
 # Instead of the flat fields above, list machines by name. Each takes the same
 # per-machine keys (vm/cpu/ram, storage, ports, ship, setup, start, domain).

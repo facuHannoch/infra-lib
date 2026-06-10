@@ -21,6 +21,18 @@ class Provider(ABC):
     size_term: str = "size"     # human term for an exact instance id (UI labels)
     presets: dict = {}          # {label: {"cpu", "ram_gb", "price", ...}}
 
+    # --- shape -----------------------------------------------------------------
+    # `kind` says where this provider enters the deploy pipeline:
+    #   "vm"             -> we get a raw box and build the substrate ourselves
+    #                       (provision -> prepare -> deliver -> configure -> expose).
+    #   "container_host" -> the provider runs a container for us; we just hand it
+    #                       image + ports + env via launch() (it absorbs the middle
+    #                       stages and gives back a URL).
+    # `workloads` is the set of workload shapes it can run: "process" and/or
+    # "container".
+    kind: str = "vm"
+    workloads: set = {"process"}
+
     # --- sizing ----------------------------------------------------------------
     @abstractmethod
     def preset_specs(self, label: str) -> ExpectedSpecs:
@@ -51,6 +63,16 @@ class Provider(ABC):
     @abstractmethod
     def list_deployments(self) -> list[dict]:
         """All deployments as [{name, ip, url, ssh_key}]."""
+
+    # --- container host (kind == "container_host") -----------------------------
+    def launch(self, name: str, vm_spec: VMSpec, image: str, ports: list,
+               env: dict = None, command: str = None, storage_gb: int = 30) -> dict:
+        """Run `image` directly on the provider and return {url, handle, ...}.
+
+        The provider's single create call stands in for provision+deliver+
+        configure+expose. Only container-host providers implement this.
+        """
+        raise NotImplementedError(f"{self.name} is not a container host.")
 
     # --- power (optional) ------------------------------------------------------
     # Stop/resume a deployment without destroying it. Optional: providers that

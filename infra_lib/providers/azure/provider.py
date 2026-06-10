@@ -20,6 +20,10 @@ class AzureProvider(Provider):
     admin_user = "azureuser"
     size_term = _sizes.SIZE_TERM
     presets = _sizes.AZURE_PRESETS
+    kind = "vm"
+    # A raw VM can run a long-lived process (rsync + systemd) or a container
+    # (via Docker on the box). Container-on-VM isn't wired yet — see todo.md.
+    workloads = {"process"}
 
     def preset_specs(self, label: str) -> ExpectedSpecs:
         return _sizes.expectedspecs_from_preset(label)

@@ -54,8 +54,28 @@ class Disk:
 
 
 @dataclass
+class Endpoint:
+    """How to reach a provisioned host. Returned by a provider's provision().
+
+    Generalizes "a public IP you SSH into on port 22 as azureuser": a RunPod pod
+    is reached on a different host/port as root, and is already root (no sudo).
+    Lets the shared transfer/health code work against any provider's box.
+    """
+    host: str
+    user: str = "azureuser"
+    ssh_port: int = 22
+    sudo: bool = True
+
+
+@dataclass
 class Machine:
-    """One VM: hardware + storage + the workload that runs on it.
+    """One machine and the workload that runs on it.
+
+    Two workload shapes (see `is_container`):
+      - process:   ship a directory, run setup, supervise `start` via systemd. VM-only.
+      - container: run an image (`image` ref, or `build` a Dockerfile dir and push
+                   to `registry`). Runs on a container host (RunPod) or a VM w/ Docker.
+    They're mutually exclusive; presence of image/build selects the container shape.
 
     `domain` lives here, not on Infrastructure: the DNS A record points at this
     machine's IP and Caddy (TLS + reverse_proxy) runs on this machine. With
@@ -66,11 +86,20 @@ class Machine:
     # time; deploy()/the TUI resolve it into a concrete VMSpec before provisioning.
     hardware: "ExpectedSpecs | VMSpec" = field(default_factory=ExpectedSpecs)
     disk: Disk = field(default_factory=Disk)
-    ship: list[str] = field(default_factory=list)       # directories to rsync over
-    setup: list[str] = field(default_factory=list)       # run once, must exit
-    start: Optional[str] = None                          # long-running service
+    ship: list[str] = field(default_factory=list)       # directories to rsync over (process)
+    setup: list[str] = field(default_factory=list)       # run once, must exit (process)
+    start: Optional[str] = None                          # process: systemd service; container: CMD override
     ports: list[int] = field(default_factory=list)       # app ports to expose
     domain: Optional["Domain"] = None
+    # --- container workload ---
+    image: Optional[str] = None                          # image ref to run, e.g. ghcr.io/me/app:latest
+    build: Optional[str] = None                          # dir with a Dockerfile to build + push
+    registry: Optional[str] = None                       # push target for `build`, e.g. ghcr.io/me
+    env: dict = field(default_factory=dict)              # env vars for the container
+
+    @property
+    def is_container(self) -> bool:
+        return bool(self.image or self.build)
 
 
 @dataclass

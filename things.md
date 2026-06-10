@@ -93,3 +93,14 @@ cd infra && pulumi preview
 
 
      pulumi up --yess
+
+```
+
+
+
+
+
+
+# d
+
+

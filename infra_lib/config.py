@@ -14,6 +14,7 @@ _MACHINE_KEYS = {
     "vm", "cpu", "ram", "gpu", "instance_type", "storage", "disk_type",
     "ship", "setup", "start", "port", "ports",
     "domain", "domain_strategy", "proxied", "cloudflare_token",
+    "image", "build", "registry", "env",
 }
 
 
@@ -144,6 +145,15 @@ def _parse_machine(data: dict, base: str, provider: str, name: str = None) -> Ma
         hardware.gpu = gpu_count or 1
         hardware.gpu_type = gpu_type
 
+    build = data.get("build")
+    if build is not None:
+        build = os.path.abspath(os.path.join(base, str(build)))
+
+    env = data.get("env") or {}
+    if not isinstance(env, dict):
+        raise ValueError("'env' must be a mapping of NAME: value.")
+    env = {str(k): str(v) for k, v in env.items()}
+
     raw_storage = data.get("storage")
     return Machine(
         name=name,
@@ -155,4 +165,8 @@ def _parse_machine(data: dict, base: str, provider: str, name: str = None) -> Ma
         ports=ports,
         start=start,
         domain=domain,
+        image=str(data["image"]) if data.get("image") else None,
+        build=build,
+        registry=str(data["registry"]) if data.get("registry") else None,
+        env=env,
     )

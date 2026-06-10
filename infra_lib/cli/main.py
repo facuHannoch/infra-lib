@@ -123,6 +123,14 @@ def cmd_deploy(args):
     if args.port:
         machine.ports = [args.port]
 
+    # Container workload (selects RunPod / container path).
+    if args.image:
+        machine.image = args.image
+    if args.build:
+        machine.build = os.path.abspath(args.build)
+    if args.registry:
+        machine.registry = args.registry
+
     # Domain: CLI flags rebuild it; otherwise keep whatever config produced.
     if args.domain or args.domain_strategy:
         try:
@@ -159,13 +167,16 @@ def cmd_sizes(args):
 def cmd_auth(args):
     provider = get_provider(args.provider)
 
-    # If any service-principal flag is given, save those creds (non-interactive).
-    # The secret may also come from the ARM_CLIENT_SECRET env var to keep it out
-    # of shell history. Otherwise fall back to the interactive device-code flow.
+    # RunPod: a single API key. Azure: service-principal flags (non-interactive,
+    # secret also accepted via ARM_CLIENT_SECRET), else the device-code flow.
     secret = args.client_secret or os.environ.get("ARM_CLIENT_SECRET")
+    api_key = args.api_key or os.environ.get("RUNPOD_API_KEY")
     sp_provided = any([args.client_id, secret, args.tenant_id, args.subscription_id])
     try:
-        if sp_provided:
+        if api_key:
+            path = provider.save_credentials(api_key=api_key)
+            print(f"Credentials saved to {path}")
+        elif sp_provided:
             path = provider.save_credentials(
                 client_id=args.client_id,
                 client_secret=secret,
@@ -293,8 +304,15 @@ def main():
     p_deploy.add_argument("--install", default=None, help="Shell command to run on the VM after deploy")
     p_deploy.add_argument("--start", default=None, help="Command to run as a supervised systemd service")
     p_deploy.add_argument("--port", type=int, default=None, help="App port to expose via reverse proxy")
-    p_deploy.add_argument("--vm", default=None, choices=_DEFAULT_PRESETS, metavar="SIZE",
-                          help=f"VM size preset: {', '.join(_DEFAULT_PRESETS)} (skips interactive prompt)")
+    p_deploy.add_argument("--vm", default=None, metavar="SIZE",
+                          help=f"Size preset (azure: {', '.join(_DEFAULT_PRESETS)}; "
+                               f"validated against the chosen provider)")
+    p_deploy.add_argument("--image", default=None, metavar="REF",
+                          help="Container image to run, e.g. ghcr.io/me/app:latest (container workload)")
+    p_deploy.add_argument("--build", default=None, metavar="DIR",
+                          help="Build an image from DIR (must contain a Dockerfile) and push it")
+    p_deploy.add_argument("--registry", default=None, metavar="REG",
+                          help="Push target for --build, e.g. ghcr.io/me")
     p_deploy.add_argument("--instance-type", default=None, metavar="SKU",
                           help="Exact instance type, e.g. Standard_D2s_v3 (skips size resolution)")
     p_deploy.add_argument("--cpu", type=int, default=None, help="Minimum vCPUs (resolved to a size)")
@@ -326,6 +344,7 @@ def main():
                     "flags for non-interactive auth with an existing SP.",
     )
     p_auth.add_argument("provider", choices=provider_names(), help="Cloud provider to authenticate with")
+    p_auth.add_argument("--api-key", default=None, help="API key (RunPod; or set RUNPOD_API_KEY)")
     p_auth.add_argument("--client-id", default=None, help="Existing service principal app/client ID")
     p_auth.add_argument("--client-secret", default=None,
                         help="SP client secret (or set ARM_CLIENT_SECRET)")

@@ -219,10 +219,27 @@ configured.
   Azure impl scopes credentials to the whole subscription and opens 22/80/443 — replicate
   the equivalents (and see the SSH-to-world note below) per cloud. *(Provider interface
   itself: done. AWS/GCP impls: not started — only add when actually needed.)*
-- **Management ops don't know their provider.** `get/list/run/logs/connect/down` only have
-  a deployment name, so `pipeline._management_provider()` defaults to the built-in
-  provider. Once a second cloud exists, persist the provider per deployment (e.g. as a
-  Pulumi stack tag/output) and look it up there. Fine while Azure is the only provider.
+- **Management ops know their provider now.** A deployment registry
+  (`core/registry.py`, `~/.infra-lib/deployments/<name>.json`) records `{provider, handle}`
+  at deploy time; `pipeline._provider_for(name)` routes get/list/down/pause to the right
+  provider (falling back to Azure for legacy stacks). *Done.*
+- **RunPod / container workload — live-untested.** `providers/runpod/` and the container
+  path in `pipeline._deploy_container` + `core/container.py` are written against the
+  `runpod` SDK and `docker` CLI but never run live (no API key / GPU quota / registry at
+  build time). First real RunPod deploy needs: `pip install runpod`, an API key
+  (`infra-lib auth runpod --api-key …`), and a `docker login ghcr.io`. Verify pod create/
+  proxy-URL/stop/resume/terminate field names against the SDK then.
+- **Container-on-VM (Docker on Azure) not wired.** Azure declares `workloads = {"process"}`,
+  so an `image:`/`build:` deploy to Azure is refused up front. To support it: install Docker
+  in `prepare`, `docker run -d --restart=always` the image, Caddy in front. This is the
+  second half of the two-axis design (the VM provider running a container workload).
+- **Private GHCR pull (`pull_secret`).** Container push uses the user's ambient
+  `docker login`; pulling a *private* image on RunPod needs read creds passed into the pod
+  spec. First cut assumes public images. Add a `pull_secret`/registry-cred path when needed.
+- **Purify the process path through the seams.** `_deploy_process` is still the original
+  inline VM logic (Caddy/DNS/systemd in the pipeline), kept as-is for low risk. The clean
+  version expresses it via provider `prepare()`/`expose()` + a workload `supervise()`/
+  `deliver()`, same as the container path — do this when touching it next.
 - **NSG opens SSH (22) to the world.** `providers/azure/provision.py` `_make_infrastructure`
   allows 22/80/443 from `*` (0.0.0.0/0). 80/443 must be public, but SSH being world-open
   invites scanning/brute-force (mitigated only by key-only auth). Consider restricting 22
