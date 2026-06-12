@@ -90,6 +90,13 @@ def _apply_overlays(args, infra):
         infra.location = args.location
     if args.storage:
         unit.disk.size_gb = args.storage
+    if args.env:
+        for item in args.env:
+            if "=" not in item:
+                print(f"error: --env must be KEY=VALUE, got: {item!r}")
+                sys.exit(1)
+            k, _, v = item.partition("=")
+            unit.env[k] = v
     if args.setup:
         unit.setup.append(args.setup)
     if args.start:
@@ -459,6 +466,8 @@ def main():
                                "Installs the NVIDIA driver automatically.")
     p_deploy.add_argument("--storage", type=int, default=None, metavar="GB",
                           help="Disk size in GB (default 30)")
+    p_deploy.add_argument("--env", action="append", default=[], metavar="KEY=VALUE",
+                          help="Set an env var on the unit (repeatable): --env FOO=bar --env BAZ=qux")
     p_deploy.add_argument("--config", nargs="?", const="", default=None, metavar="FILE",
                           help="Config file to use. Omit path to open an editor.")
     p_deploy.add_argument("--no-config", action="store_true",

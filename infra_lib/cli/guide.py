@@ -82,6 +82,7 @@ infra-lib deploy --name mypod --type pod --gpu a40 --image runpod/base:0.6.0 --p
 | `--domain-strategy S` | — | `own` (you manage DNS), `cloudflare` (auto DNS update), `http` (no domain) |
 | `--start CMD` | — | Long-running command (systemd service on vm; container CMD on pod) |
 | `--setup CMD` | — | One-off command that runs once after deploy, before start. Must exit. |
+| `--env KEY=VALUE` | — | Set an env var on the unit (repeatable). Safe way to pass secrets. |
 | `--storage GB` | 30 | Disk / volume size |
 | `--location REGION` | CentralUS | Azure region or RunPod datacenter hint |
 | `--ssh-key PATH` | auto-generated | Path to private key |
@@ -208,7 +209,10 @@ infra_lib.destroy("myapp")
 - Disk survives pause/resume; public IP may change on resume
 - **Starts as a bare Ubuntu 22.04 VM.** Nothing is pre-installed except Caddy (for
   `--domain`) and the SSH server. Node, Python runtimes, compilers, etc. must be
-  installed in `--setup`. Always begin with `apt-get update && apt-get install -y ...`.
+  installed in `--setup`. Always begin with `sudo apt-get update && sudo apt-get install -y ...`.
+- **Setup runs as `azureuser` (non-root).** Use `sudo` for any system command:
+  `sudo apt-get`, `sudo systemctl`, `sudo tee`, etc. App-level commands
+  (`npm install`, `pip install`) do not need sudo.
 
 ### RunPod (pod)
 - GPU catalog: `a40`, `rtxa6000`, `rtx6000ada`, `l40`, `l40s`, `a100`, `h100`
@@ -265,7 +269,7 @@ Deploy a Next.js blog to a domain (bare VM — must install Node first):
 infra-lib deploy ./blog --name my-blog \\
   --size small --port 3000 \\
   --domain example.com --domain-strategy own \\
-  --setup "apt-get update -qq && apt-get install -y nodejs npm && cd /srv/files/blog && npm install && npm run build" \\
+  --setup "sudo apt-get update -qq && sudo apt-get install -y nodejs npm && cd /srv/files/blog && npm install && npm run build" \\
   --start "cd /srv/files/blog && npm run start"
 ```
 
@@ -277,9 +281,28 @@ Deploy a VM with a local Python project:
 ```
 infra-lib deploy ./myproject --name webapp \\
   --size small --port 8000 \\
-  --setup "apt-get update -qq && apt-get install -y python3 python3-pip && pip install -r /srv/files/myproject/requirements.txt" \\
+  --setup "sudo apt-get update -qq && sudo apt-get install -y python3 python3-pip && pip install -r /srv/files/myproject/requirements.txt" \\
   --start "python3 /srv/files/myproject/app.py"
 ```
+
+---
+
+## GitHub auth on the VM
+
+Pass a Personal Access Token via `--env` and configure git in `--setup`:
+
+```
+infra-lib deploy ./myapp --name myapp \\
+  --env GITHUB_TOKEN=ghp_xxxx \\
+  --setup "sudo apt-get update -qq && sudo apt-get install -y git && \\
+    git config --global credential.helper store && \\
+    echo https://x-token:$GITHUB_TOKEN@github.com > ~/.git-credentials" \\
+  --start "..."
+```
+
+For **read-only** access to a single repo, prefer a GitHub deploy key instead:
+generate a key on the VM after deploy (`ssh-keygen`), then add the public key
+to the repo under Settings → Deploy keys.
 
 ---
 
@@ -287,8 +310,8 @@ infra-lib deploy ./myproject --name webapp \\
 
 **Wrong: forgetting apt-get update / runtime install**
 ```bash
---setup "npm install"   ✗  (Node isn't on the VM — apt-get install nodejs first)
---setup "apt-get update -qq && apt-get install -y nodejs npm && npm install"   ✓
+--setup "npm install"   ✗  (Node isn't on the VM — install it first, with sudo)
+--setup "sudo apt-get update -qq && sudo apt-get install -y nodejs npm && npm install"   ✓
 ```
 The VM is bare Ubuntu 22.04. Install every runtime your app needs in `--setup`.
 
