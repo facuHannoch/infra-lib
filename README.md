@@ -302,6 +302,7 @@ image: ghcr.io/me/llm:latest # ...a prebuilt image (bring-your-image), OR:
 # registry: ghcr.io/me       #    where `build` pushes (needs `docker login`)
 
 start: python serve.py       # optional: overrides the container CMD
+
 env:
   MODEL: llama3
 
@@ -355,11 +356,12 @@ With **no config and no unit-defining flags**, an interactive picker runs.
 | `--gpu N\|TYPE` | Request a GPU: a count (`2`) or a type (`t4`/`a10`/`a100` on Azure; `a40`/`l40s`/… on RunPod). |
 | `--image REF` | Container image to boot, e.g. `ghcr.io/me/app:latest`. **Implies a pod.** |
 | `--build DIR` | Build the Dockerfile in DIR and push it, then run it. Implies a pod. |
-| `--registry REG` | Push target for `--build`, e.g. `ghcr.io/me` (needs `docker login`). |
+| `--dockerfile FILE\|-` | Dockerfile path, `-` to read from stdin, or omit path to open `$EDITOR`. Implies a pod. |
+| `--registry REG` | Push target for `--build`/`--dockerfile`, e.g. `ghcr.io/me` (needs `docker login`). |
 | `--storage GB` | Disk/volume size (default 30). |
 | `--port N` | App port to expose (Caddy reverse-proxy on vm; proxy URL on pod). |
 | `--start CMD` | Long-running command (systemd on vm; container CMD on pod). |
-| `--install CMD` | A one-off setup command (appended to `setup`). |
+| `--setup CMD` | A one-off command that runs once after deploy, before start. Must exit. Install runtimes and build here. |
 | `--domain D` | Domain to serve on (vm). |
 | `--domain-strategy S` | `own` (BYO DNS), `cloudflare` (auto DNS), `http` (no domain). |
 | `--proxied` | A proxy terminates TLS (Caddy serves plain HTTP on the origin). |
@@ -449,6 +451,32 @@ that — or a named size — into a concrete **`VMSpec`** (`type`, cpu, ram, gpu
 
 ---
 
+## `--dockerfile`: write a Dockerfile inline
+
+Instead of pointing at a whole build directory with `--build`, you can write (or
+pipe) a Dockerfile directly. All three forms create a temp build context and imply
+a pod — equivalent to `--build <tempdir>`.
+
+```bash
+# Explicit path
+infra-lib deploy --dockerfile ./Dockerfile --registry ghcr.io/me --name mypod
+
+# Read from stdin — best for scripts and LLM agents
+echo 'FROM python:3.11-slim
+CMD python3 -m http.server 8000' | \
+  infra-lib deploy --dockerfile - --registry ghcr.io/me --name mypod --port 8000
+
+# Omit the path to open $EDITOR with a template (same pattern as --config)
+infra-lib deploy --dockerfile --registry ghcr.io/me --name mypod
+```
+
+The stdin form (`--dockerfile -`) is the **agent-native path**: an LLM generates
+the Dockerfile content as a string and pipes it in — no temp files to manage, no
+local directory needed. It requires `--registry` and a prior `docker login` to that
+registry, same as `--build`.
+
+---
+
 ## Shipping files (`ship`)
 
 `ship` is a list of local directories rsync'd to the machine. Each entry is either a
@@ -467,8 +495,19 @@ ship:
 - Missing destination directories are **created** (`mkdir -p`) before transfer.
 - Trailing slashes are normalized so the source's **contents land *at* the
   destination** (not nested under it).
-- `.gitignore` is respected; `.git`, `__pycache__`, `.venv`, `venv`, `node_modules`,
-  `.env` are always excluded.
+- `.gitignore` is respected (rsync `--filter=:- .gitignore`).
+- The following are **always excluded**, regardless of `.gitignore`:
+
+  | Category | Excluded |
+  |---|---|
+  | Version control | `.git` |
+  | Python | `__pycache__`, `.venv`, `venv`, `*.pyc` |
+  | Node / JS | `node_modules`, `.next`, `.nuxt`, `.svelte-kit` |
+  | Build output | `dist`, `out`, `build`, `target` |
+  | Secrets | `.env`, `.env.*` |
+
+  So shipping a Next.js or Node project is safe — `node_modules` (often hundreds of
+  MB) and `.next` are never transferred.
 
 `ship` runs wherever SSH is available — always on a vm; on a pod only when its image
 runs `sshd` (best-effort; otherwise it's skipped with a warning).

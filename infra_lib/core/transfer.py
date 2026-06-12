@@ -16,7 +16,18 @@ _DEFAULT_SSH_KEY = os.path.expanduser("~/.infra-lib/keys/default_id_rsa")
 # pass the unit's user through; this default keeps direct/legacy callers working.
 _DEFAULT_USER = "azureuser"
 
-_ALWAYS_EXCLUDE = [".git", "__pycache__", ".venv", "venv", "node_modules", ".env"]
+_ALWAYS_EXCLUDE = [
+    # version control
+    ".git",
+    # Python
+    "__pycache__", ".venv", "venv", "*.pyc",
+    # Node / JS
+    "node_modules", ".next", ".nuxt", ".svelte-kit",
+    # generic build output
+    "dist", "out", "build", "target",
+    # secrets / local config
+    ".env", ".env.*",
+]
 
 
 def _connect(host: str, ssh_key_path: str, user: str = _DEFAULT_USER,

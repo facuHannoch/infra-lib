@@ -78,7 +78,7 @@ def _parse_gpu_arg(s: str):
 def _has_unit_flags(args) -> bool:
     """Whether the user specified the unit on the CLI (so we skip the TUI)."""
     return any([args.type, args.provider, args.size, args.cpu, args.ram,
-                args.instance_type, args.gpu, args.image, args.build])
+                args.instance_type, args.gpu, args.image, args.build, args.dockerfile])
 
 
 def _apply_overlays(args, infra):
@@ -90,8 +90,8 @@ def _apply_overlays(args, infra):
         infra.location = args.location
     if args.storage:
         unit.disk.size_gb = args.storage
-    if args.install:
-        unit.setup.append(args.install)
+    if args.setup:
+        unit.setup.append(args.setup)
     if args.start:
         unit.start = args.start
     if args.port:
@@ -105,6 +105,51 @@ def _apply_overlays(args, infra):
         except ValueError as e:
             print(f"error: {e}")
             sys.exit(1)
+
+
+_DOCKERFILE_TEMPLATE = """\
+FROM python:3.11-slim
+# Add your build steps here
+WORKDIR /app
+# COPY . .
+# RUN pip install -r requirements.txt
+CMD ["python", "-m", "http.server", "8000"]
+"""
+
+
+def _resolve_dockerfile(value: str) -> str:
+    """Turn --dockerfile value into a temp build-context dir containing a Dockerfile.
+
+    Three modes:
+      value == ""   → open $EDITOR (human)
+      value == "-"  → read from stdin (agent / pipe)
+      value == PATH → read the file at that path
+    Returns the temp dir path; caller owns its lifetime.
+    """
+    import tempfile, subprocess as sp
+
+    if value == "":
+        editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "nano"
+        with tempfile.NamedTemporaryFile(suffix=".dockerfile", mode="w", delete=False) as f:
+            f.write(_DOCKERFILE_TEMPLATE)
+            tmp = f.name
+        sp.call([editor, tmp])
+        with open(tmp) as f:
+            content = f.read()
+        os.unlink(tmp)
+    elif value == "-":
+        content = sys.stdin.read()
+    else:
+        if not os.path.isfile(value):
+            print(f"error: Dockerfile not found: {value}")
+            sys.exit(1)
+        with open(value) as f:
+            content = f.read()
+
+    ctx = tempfile.mkdtemp(prefix="infra-lib-dockerfile-")
+    with open(os.path.join(ctx, "Dockerfile"), "w") as f:
+        f.write(content)
+    return ctx
 
 
 def cmd_deploy(args):
@@ -158,6 +203,13 @@ def cmd_deploy(args):
         unit.hardware.gpu = gpu_count or 1
         unit.hardware.gpu_type = gpu_type
 
+    if args.dockerfile is not None:
+        # --dockerfile always wins over --build; both produce a build dir
+        args.build = _resolve_dockerfile(args.dockerfile)
+        if not unit_type:
+            unit.type = "pod"
+            infra.provider = default_provider_for_type("pod")
+
     if args.image:
         unit.image = args.image
     if args.build:
@@ -186,7 +238,50 @@ def cmd_sizes(args):
         sys.exit(1)
 
 
+def cmd_auth_status():
+    import configparser
+    creds_file = os.path.expanduser("~/.infra-lib/credentials")
+    config = configparser.ConfigParser()
+    config.read(creds_file)
+
+    rows = []
+
+    # Azure — file or ARM_ env vars
+    if os.environ.get("ARM_CLIENT_ID"):
+        rows.append(("azure", "✓ configured",
+                     f"subscription={os.environ.get('ARM_SUBSCRIPTION_ID', '?')}  "
+                     f"[source: env]"))
+    elif "azure" in config:
+        c = config["azure"]
+        rows.append(("azure", "✓ configured",
+                     f"subscription={c.get('subscription_id', '?')}  "
+                     f"tenant={c.get('tenant_id', '?')}"))
+    else:
+        rows.append(("azure", "✗ not configured",
+                     "run: infra-lib auth azure"))
+
+    # RunPod — env or file
+    if os.environ.get("RUNPOD_API_KEY"):
+        key = os.environ["RUNPOD_API_KEY"]
+        rows.append(("runpod", "✓ configured",
+                     f"api_key={key[:6]}…  [source: env]"))
+    elif "runpod" in config and config["runpod"].get("api_key"):
+        key = config["runpod"]["api_key"]
+        rows.append(("runpod", "✓ configured",
+                     f"api_key={key[:6]}…"))
+    else:
+        rows.append(("runpod", "✗ not configured",
+                     "run: infra-lib auth runpod --api-key KEY"))
+
+    for provider, status, detail in rows:
+        print(f"{provider:<10} {status:<20} {detail}")
+
+
 def cmd_auth(args):
+    if args.provider == "status":
+        cmd_auth_status()
+        return
+
     provider = get_provider(args.provider)
 
     # RunPod: a single API key. Azure: service-principal flags (non-interactive,
@@ -304,10 +399,23 @@ def _configure_logging(verbosity: int):
     root.addHandler(handler)
 
 
+def cmd_guide(_args=None):
+    from .guide import GUIDE
+    print(GUIDE)
+
+
 def main():
     progress.set_reporter(ConsoleReporter())
 
-    parser = argparse.ArgumentParser(prog="infra-lib", description="Deploy a directory to the cloud.")
+    parser = argparse.ArgumentParser(
+        prog="infra-lib",
+        description=(
+            "Deploy a directory or container to the cloud (Azure VMs, RunPod GPU pods).\n"
+            "IMPORTANT: Run 'infra-lib guide' for the full reference <-- start here if you are an LLM."
+        ),
+        epilog="Run 'infra-lib guide' for the full reference including auth, deploy shapes, and the Python API.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("-v", "--verbose", action="count", default=0,
                         help="Diagnostics to stderr (-v info, -vv debug)")
     subparsers = parser.add_subparsers(dest="command")
@@ -327,7 +435,7 @@ def main():
     p_deploy.add_argument("--domain-strategy", default=None, choices=["own", "cloudflare", "http"])
     p_deploy.add_argument("--proxied", action="store_true")
     p_deploy.add_argument("--cloudflare-token", default=None)
-    p_deploy.add_argument("--install", default=None, help="Shell command to run on the VM after deploy")
+    p_deploy.add_argument("--setup", default=None, help="Shell command to run once after deploy, before start (must exit)")
     p_deploy.add_argument("--start", default=None, help="Command to run as a supervised systemd service")
     p_deploy.add_argument("--port", type=int, default=None, help="App port to expose via reverse proxy")
     p_deploy.add_argument("--size", default=None, metavar="SIZE",
@@ -337,6 +445,9 @@ def main():
                           help="Container image to boot, e.g. ghcr.io/me/app:latest (implies a pod)")
     p_deploy.add_argument("--build", default=None, metavar="DIR",
                           help="Build an image from DIR (must contain a Dockerfile) and push it")
+    p_deploy.add_argument("--dockerfile", nargs="?", const="", default=None, metavar="FILE|-",
+                          help="Dockerfile path, '-' to read from stdin, or omit path to open an editor. "
+                               "Creates a build context and implies a pod (like --build).")
     p_deploy.add_argument("--registry", default=None, metavar="REG",
                           help="Push target for --build, e.g. ghcr.io/me")
     p_deploy.add_argument("--instance-type", default=None, metavar="SKU",
@@ -365,11 +476,13 @@ def main():
     # auth
     p_auth = subparsers.add_parser(
         "auth",
-        help="Authenticate with a cloud provider",
+        help="Authenticate with a cloud provider (or 'status' to check)",
         description="Interactive device-code flow by default; pass service-principal "
-                    "flags for non-interactive auth with an existing SP.",
+                    "flags for non-interactive auth with an existing SP. "
+                    "Use 'status' to check what is currently configured.",
     )
-    p_auth.add_argument("provider", choices=provider_names(), help="Cloud provider to authenticate with")
+    p_auth.add_argument("provider", choices=[*provider_names(), "status"],
+                        help="Cloud provider to authenticate with, or 'status' to show auth state")
     p_auth.add_argument("--api-key", default=None, help="API key (RunPod; or set RUNPOD_API_KEY)")
     p_auth.add_argument("--client-id", default=None, help="Existing service principal app/client ID")
     p_auth.add_argument("--client-secret", default=None,
@@ -405,6 +518,9 @@ def main():
     p_list = subparsers.add_parser("list", help="List all deployments")
     p_list.add_argument("-n", "--names", action="store_true", help="Print names only, one per line")
 
+    # guide
+    subparsers.add_parser("guide", help="Print the full LLM-friendly reference and exit")
+
     args = parser.parse_args()
     _configure_logging(args.verbose)
 
@@ -426,8 +542,11 @@ def main():
         cmd_logs(args)
     elif args.command == "list":
         cmd_list(args)
+    elif args.command == "guide":
+        cmd_guide()
     else:
         parser.print_help()
+        print("\nRun 'infra-lib guide' for the full reference.")
 
 
 if __name__ == "__main__":
